@@ -27,7 +27,7 @@ UInt getProbabilisticMutation(vector < vector < UInt > > _sequencePool, vector <
 vector < vector < UInt > > buildSequencePool();
 
 //--Program setup----------------------------------------------------------------------------------------
-int main (int argc, char* argv[], string argz)
+int main (int argc, char* argv[])
 {
 	//--Running parameters
 	if (argc !=3)
@@ -36,6 +36,7 @@ int main (int argc, char* argv[], string argz)
 		exit(1);
 	}
 	string infile = argv[1];
+	string localout = argv[2];
     enum aminoAcid {A,R,N,D,Dh,C,Cx,Cf,Q,E,Eh,Hd,He,Hn,Hp,I,L,K,M,F,P,O,S,T,W,Y,V,G,dA,dR,dN,dD,dDh,dC,dCx,dQ,dE,dEh,dHd,dHe,dHn,dHp,dI,dL,dK,dM,dF,dP,dO,dS,dT,dAT,dW,dY,dV,Hce,Pch,Csf};
     string aminoAcidString[] = {"A","R","N","D","Dh","C","Cx","Cf","Q","E","Eh","Hd","He","Hn","Hp","I","L","K","M","F","P","O","S","T","W","Y","V","G","dA","dR","dN","dD","dDh","dC","dCx","dQ","dE","dEh","dHd","dHe","dHn","dHp","dI","dL","dK","dM","dF","dP","dO","dS","dT","dAT","dW","dY","dV","Hce","Pch","Csf"};
     PDBInterface* thePDB = new PDBInterface(infile);
@@ -215,7 +216,7 @@ int main (int argc, char* argv[], string argz)
             finalline << timeid << " " << bindingEnergy[0] << " " << bindingEnergy[1] << " ";
 
 	    fstream finallocal;
-	    finallocal.open (argz, fstream::in | fstream::out | fstream::app);
+	    finallocal.open (localout, fstream::in | fstream::out | fstream::app);
             finallocal << timeid << " " << bindingEnergy[0] << " " << bindingEnergy[1] << " ";
                         
             fstream fs;
