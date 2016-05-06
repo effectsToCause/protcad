@@ -27,7 +27,7 @@ UInt getProbabilisticMutation(vector < vector < UInt > > _sequencePool, vector <
 vector < vector < UInt > > buildSequencePool();
 
 //--Program setup----------------------------------------------------------------------------------------
-int main (int argc, char* argv[])
+int main (int argc, char* argv[], char* argz)
 {
 	//--Running parameters
 	if (argc !=2)
@@ -36,6 +36,7 @@ int main (int argc, char* argv[])
 		exit(1);
 	}
 	string infile = argv[1];
+	string argz;
     enum aminoAcid {A,R,N,D,Dh,C,Cx,Cf,Q,E,Eh,Hd,He,Hn,Hp,I,L,K,M,F,P,O,S,T,W,Y,V,G,dA,dR,dN,dD,dDh,dC,dCx,dQ,dE,dEh,dHd,dHe,dHn,dHp,dI,dL,dK,dM,dF,dP,dO,dS,dT,dAT,dW,dY,dV,Hce,Pch,Csf};
     string aminoAcidString[] = {"A","R","N","D","Dh","C","Cx","Cf","Q","E","Eh","Hd","He","Hn","Hp","I","L","K","M","F","P","O","S","T","W","Y","V","G","dA","dR","dN","dD","dDh","dC","dCx","dQ","dE","dEh","dHd","dHe","dHn","dHp","dI","dL","dK","dM","dF","dP","dO","dS","dT","dAT","dW","dY","dV","Hce","Pch","Csf"};
     PDBInterface* thePDB = new PDBInterface(infile);
@@ -210,19 +211,29 @@ int main (int argc, char* argv[])
                 chainSequence = getChainSequence(model, activeChains[i]);
                 finalSequence.push_back(chainSequence);
             }
-            cout << timeid << " " << bindingEnergy[0] << " " << bindingEnergy[1] << " ";
+            fstream finalline;
+            finalline.open ("final.out", fstream::in | fstream::out | fstream::app);
+            finalline << timeid << " " << bindingEnergy[0] << " " << bindingEnergy[1] << " ";
+
+	    fstream finallocal;
+	    finallocal.open (argz, fstream::in | fstream::out | fstream::app);
+            finallocal << timeid << " " << bindingEnergy[0] << " " << bindingEnergy[1] << " ";
+                        
             fstream fs;
             fs.open ("finalsequences.out", fstream::in | fstream::out | fstream::app);
             for (UInt i = 0; i < activeChainsSize; i++)
             {
                 for (UInt j = 0; j < finalSequence[i].size(); j++)
                 {
-                    cout << aminoAcidString[finalSequence[i][j]] << " ";
+                    finalline << aminoAcidString[finalSequence[i][j]] << " ";
                     fs << finalSequence[i][j] << ",";
                 }
             }
-            cout << endl;
             fs << endl;
+            finalline << endl;
+            finalline.close();
+            finallocal << endl;
+            finallocal.close();
             fs.close();
         }
 		delete theModelPDB;
