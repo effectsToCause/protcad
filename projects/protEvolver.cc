@@ -30,7 +30,7 @@ vector < vector < UInt > > buildSequencePool();
 int main (int argc, char* argv[], string argz)
 {
 	//--Running parameters
-	if (argc !=2)
+	if (argc !=3)
 	{
 		cout << "protEvolver <inFile.pdb>" << endl;
 		exit(1);
