@@ -257,7 +257,7 @@ void calcEnergies(double* x_h, double* y_h, double* z_h, double* vol_h, double *
   check(cudaMemcpy(E_d, E_h, sizeof(double), cudaMemcpyHostToDevice));
   
   // Bound and invoke the distance kernel
-  int tC = N * (N - 1);
+  int tC = N * (N-1);
   int blocks = (tC+threads_per_block-1)/threads_per_block;
   calcDistance <<< blocks, threads_per_block >>> (x_d,y_d,z_d,rad_d,vol_d,dis_d,N);
   calcEnergy <<< blocks, threads_per_block >>> (rad_d,eps_d,chg_d,vol_d,dis_d,bon_d,E_d,N);
