@@ -137,6 +137,9 @@ public:
 	void calculateSidechainDihedralAngles();
 	void calculatePolarHDihedralAngle();
 	vector< vector< double > > getSidechainDihedralAngles();
+	// As above, but returns 1000.0 for any dihedral that cannot be measured
+	// because one of its four atoms was never given coordinates from the input.
+	vector< vector< double > > getMeasurableSidechainDihedralAngles();
 	vector< vector< double > > randContinuousSidechainConformation();
 	double getPhi();
 	double getPsi();

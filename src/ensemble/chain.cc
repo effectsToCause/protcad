@@ -422,7 +422,14 @@ void chain::rebuildResidue(const UInt _indexInChain)
 		vector < vector <double> > currentRot;
 		residue* pOldRes = itsResidues[_indexInChain];
 		UInt itsResType = itsResidues[_indexInChain]->getTypeIndex();
-		currentRot = getSidechainDihedralAngles(_indexInChain);
+		// Only dihedrals whose four defining atoms all came from the input file
+		// are meaningful here.  Atoms absent from the file (typically hydrogens)
+		// still carry raw residue-template coordinates, so a dihedral measured
+		// across that mixture compares two unrelated frames and its value tracks
+		// the absolute position of the molecule.  Restoring such a value onto the
+		// rebuilt residue made the structure, and therefore its energy, depend on
+		// where the protein sat in space.
+		currentRot = pOldRes->getMeasurableSidechainDihedralAngles();
 		bool fliptoD = isDAminoAcid(pOldRes);
 		if (fliptoD){itsResidues[_indexInChain] = pOldRes->mutateNew(itsResType+Daa);}
 		else{itsResidues[_indexInChain] = pOldRes->mutateNew(itsResType);}
@@ -1472,7 +1479,11 @@ void chain::setSidechainDihedralAngles(UInt _indexInChain, vector <vector <doubl
 {
 	for (UInt i=0; i<Angles.size(); i++)
 	{	for (UInt j=0; j<Angles[i].size(); j++)
-		{	itsResidues[_indexInChain]->setChi(i,j,Angles[i][j]);
+		{	// 1000.0 is the "no measurable dihedral" sentinel; restoring it would
+			// rotate the branch by a meaningless delta, so leave the value the
+			// residue was built with.
+			if (Angles[i][j] > 999.0) continue;
+			itsResidues[_indexInChain]->setChi(i,j,Angles[i][j]);
 		}
 	}
 	itsResidues[_indexInChain]->setMoved();

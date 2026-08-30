@@ -2260,6 +2260,28 @@ vector< vector< double > > residue::getSidechainDihedralAngles()
 	 return itsSidechainDihedralAngles;
 }
 
+vector< vector< double > > residue::getMeasurableSidechainDihedralAngles()
+{
+	calculateSidechainDihedralAngles();
+	vector< vector< double > > angles = itsSidechainDihedralAngles;
+	UInt branchpoints = getNumBpt(itsType);
+	for (UInt i = 0; i < branchpoints && i < angles.size(); i++)
+	{	UInt dihedrals = getNumDihedralAngles(itsType, i);
+		for (UInt j = 0; j < dihedrals && j < angles[i].size(); j++)
+		{	vector<UInt> quad = dataBase[itsType].getAtomsOfChi(i, j);
+			bool measurable = (quad.size() == 4);
+			for (UInt k = 0; k < quad.size(); k++)
+			{	if (quad[k] >= itsAtoms.size() || !itsAtoms[quad[k]]->isFullySpecified())
+				{	measurable = false;
+					break;
+				}
+			}
+			if (!measurable) angles[i][j] = 1000.0;
+		}
+	}
+	return angles;
+}
+
 // ************************************************************************
 // ************************************************************************
 // Rotation and Translation and more .....
