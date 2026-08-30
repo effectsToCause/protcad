@@ -24,7 +24,7 @@ export MAKE = make
 
 SHELL = /bin/sh
 
-TARGETS = protDielectric protEvolver protDihedrals protOligamer protEnergy protMover protMutator protSequence protInverter protMin protAlign protShaper protBindingEnergy hammingdist protSampling protTest protMinRep
+TARGETS = protDielectric protEvolver protDihedrals protOligamer protEnergy protMover protMutator protSequence protInverter protMin protAlign protShaper protBindingEnergy hammingdist protSampling protTest protMinRep protMutate
 
 .SUFFIXES: .cc .o .h .a .f .cu
 
@@ -147,6 +147,10 @@ amberParamsTest : libprotcad.a amberParamsTest.cc
 	cd $(OBJDIR) && mv $@ $(BINDIR)
 
 protMinRep : libprotcad.a protMinRep.cc
+	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
+	cd $(OBJDIR) && strip $@ && mv $@ $(BINDIR)
+
+protMutate : libprotcad.a protMutate.cc
 	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
 	cd $(OBJDIR) && strip $@ && mv $@ $(BINDIR)
 
