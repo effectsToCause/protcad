@@ -44,7 +44,9 @@
 //
 // Because of 3, starting energies change for any structure containing waters:
 // 1ubq moves 1510.84 -> 1508.98 and 2lzm 1643.58 -> 1646.39.  These are bug
-// fixes, not drift.  1crn is unchanged at 523.60.
+// fixes, not drift.  1crn was unchanged at 523.60 at the time of this change;
+// it now reads 510.98, because a later fix stopped hydroxyl hydrogens being
+// placed from a dihedral measured across the template and file frames.
 //
 // Beyond those cases the results agree with the Fortran to ~5e-14 but are not
 // bit-identical, because a different sequence of floating point operations

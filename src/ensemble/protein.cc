@@ -2623,7 +2623,7 @@ int protein::getNumAtoms()
 // The CPU pair-loop that used to live here was not a second opinion on the
 // same model, it was a stale one: it predated the ff14SB radii, the torsion
 // term and the dielectric fix, and on 1crn it returned 4869.34 against the
-// kernel's 523.60.  Keeping both meant every caller silently got whichever
+// kernel's 510.98.  Keeping both meant every caller silently got whichever
 // physics its author happened to reach for.  The name is kept so the project
 // call sites read unchanged.
 double protein::protEnergy()
