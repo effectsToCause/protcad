@@ -1,19 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
-# CUDA is optional-by-detection rather than a hard requirement, so the language
-# list is assembled before project() is called.
-project(protcad LANGUAGES CXX)
-
-include(CheckLanguage)
-
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-    set(PROTCAD_CUDA ON)
-else()
-    set(PROTCAD_CUDA OFF)
-    message(STATUS "protcad: no CUDA compiler found, building the CPU-only path")
-endif()
+# CUDA is a hard requirement.  The CPU energy path has been removed, so there
+# is nothing left to fall back to: without the kernels there is no energy
+# model at all.
+project(protcad LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_EXTENSIONS ON)
@@ -65,24 +55,22 @@ if(PROTCAD_NATIVE_ARCH)
         $<$<COMPILE_LANGUAGE:CXX>:-march=native;-mtune=native>)
 endif()
 
-if(PROTCAD_CUDA)
-    target_sources(protcad PRIVATE ${CMAKE_SOURCE_DIR}/src/ensemble/energy.cu)
+target_sources(protcad PRIVATE ${CMAKE_SOURCE_DIR}/src/ensemble/energy.cu)
 
-    # __CUDA__ must reach every translation unit, not just the .cu file.  When
-    # it was missing from the host compile, every GPU call site in protein.cc
-    # was preprocessed away and the kernels were built but never called.
-    target_compile_definitions(protcad PUBLIC __CUDA__)
+# __CUDA__ must reach every translation unit, not just the .cu file.  When it
+# was missing from the host compile, every GPU call site in protein.cc was
+# preprocessed away and the kernels were built but never called.
+target_compile_definitions(protcad PUBLIC __CUDA__)
 
-    # A fatbin spanning Pascal through Ampere plus PTX for anything newer.  A
-    # single -arch produces cubins that will not load on any other card.
-    set_property(TARGET protcad PROPERTY CUDA_ARCHITECTURES 61 75 86 86-virtual)
-    set_property(TARGET protcad PROPERTY CUDA_SEPARABLE_COMPILATION OFF)
-    target_compile_options(protcad PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
+# A fatbin spanning Pascal through Ampere plus PTX for anything newer.  A
+# single -arch produces cubins that will not load on any other card.
+set_property(TARGET protcad PROPERTY CUDA_ARCHITECTURES 61 75 86 86-virtual)
+set_property(TARGET protcad PROPERTY CUDA_SEPARABLE_COMPILATION OFF)
+target_compile_options(protcad PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3>)
 
-    find_package(CUDAToolkit REQUIRED)
-    target_link_libraries(protcad PUBLIC CUDA::cudart CUDA::cuda_driver)
-endif()
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(protcad PUBLIC CUDA::cudart CUDA::cuda_driver)
 
 # ---------------------------------------------------------------------------
 # projects/ -- one installed binary per source file

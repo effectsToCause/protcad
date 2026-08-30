@@ -39,7 +39,8 @@ In terminal:
 
 sudo apt install g++ git cmake
 
-For automatic cuda support you will also need:
+CUDA is required -- the energy model is implemented entirely in CUDA kernels
+and there is no CPU fallback, so nvcc and an NVIDIA GPU are mandatory:
 
 sudo apt install nvidia-cuda-toolkit
 
@@ -66,9 +67,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build -j
 
-CUDA and its kernels are picked up automatically when nvcc is present, and the
-build falls back to the CPU-only path when it is not.  Binaries are written to
-protcad/bin.  Add that directory to your PATH, then close and re-open the
+The build requires nvcc and will fail to configure without it.  Binaries are
+written to protcad/bin.  Add that directory to your PATH, then close and re-open the
 terminal:
 
 echo "export PROTCADDIR=$PWD" >> ~/.bashrc
