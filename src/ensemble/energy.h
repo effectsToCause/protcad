@@ -274,6 +274,31 @@ void energySetSilent(energyContext* ctx, const unsigned char* silent);
 // x, y, z are host arrays of length numAtoms.
 // Returns 0 on success, nonzero on CUDA error.  If breakdown is non-null it
 // receives the per-term decomposition.
+// Batched candidate evaluation.
+//
+// Evaluates nCand complete conformations in one set of kernel launches and
+// writes nCand total energies to `totals`.  x, y and z each hold nCand * N
+// doubles, candidate k occupying [k*N, (k+1)*N).
+//
+// A protein leaves the GPU nearly idle -- a 600-atom system is ~19 warps on
+// 1280 cores -- so many candidates cost little more than one.  All candidates
+// share the spatial order built from the context's current resident
+// coordinates, which is exact because the order only drives bounding-box
+// culling.  Set the base conformation with energySetCoords first so that order
+// reflects a representative geometry.
+//
+// Agreement with energyCompute is exact in exact arithmetic, and bitwise in
+// FP64.  In FP32 it is ~1e-9 relative: candidates share the base spatial order
+// while a lone evaluation sorts on its own coordinates, so pairs accumulate in
+// a different order.  That is ~1e-6 kcal/mol on a typical protein energy, six
+// orders below KT.  Within a batch the ranking is exactly self-consistent,
+// since every candidate uses the same order.
+//
+// Returns 0 on success, -1 on failure.
+int energyComputeBatch(energyContext* ctx, int nCand,
+                       const double* x, const double* y, const double* z,
+                       double* totals);
+
 int energyCompute(energyContext* ctx,
                   const double* x, const double* y, const double* z,
                   double* totalOut, energyBreakdown* breakdown);

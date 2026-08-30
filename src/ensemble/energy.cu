@@ -127,6 +127,15 @@ struct energyContext
     int   *d_cellOf, *d_cellCount, *d_cellStart, *d_cellCursor;
     int    cellCapacity;
 
+    // Batched candidate evaluation.  Grown on demand; batchCap is the number of
+    // candidates the buffers currently hold.
+    int    batchCap;
+    ereal *d_bx, *d_by, *d_bz;
+    ereal *d_bsx, *d_bsy, *d_bsz;
+    ereal *d_bocc, *d_btileLo, *d_btileHi;
+    ereal *d_bterms;
+    std::vector<ereal> h_bx, h_by, h_bz, h_bterms;
+
     // Host staging (pinned).
     ereal *h_x, *h_y, *h_z;
     ereal *h_terms;               // 5 * nPad
@@ -453,6 +462,30 @@ __global__ void kSortCells(const int* cellStart, const int* cellCount,
     }
 }
 
+// Gather coordinates only, for a batch of candidate conformations that all
+// share one spatial order.  The order is an AABB-culling optimization, not
+// physics, so reusing the base conformation's order for every candidate is
+// exact; it also keeps radii, charges, residue indices and silent flags
+// batch-invariant, which is what makes the batch cheap.
+__global__ void kGatherCoords(int nPad, int N, const int* __restrict__ order,
+                              const ereal* __restrict__ bx,
+                              const ereal* __restrict__ by,
+                              const ereal* __restrict__ bz,
+                              ereal* __restrict__ sx,
+                              ereal* __restrict__ sy,
+                              ereal* __restrict__ sz)
+{
+    const size_t k = blockIdx.y;
+    bx += k * (size_t)N;    by += k * (size_t)N;    bz += k * (size_t)N;
+    sx += k * (size_t)nPad; sy += k * (size_t)nPad; sz += k * (size_t)nPad;
+
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nPad) return;
+    if (s >= N) { sx[s] = ereal(1e9); sy[s] = ereal(1e9); sz[s] = ereal(1e9); return; }
+    int i = order[s];
+    sx[s] = bx[i]; sy[s] = by[i]; sz[s] = bz[i];
+}
+
 __global__ void kGather(int nPad, int N, const int* order,
                         const ereal* x, const ereal* y, const ereal* z,
                         const ereal* rad, const ereal* sqrtEps, const ereal* chg,
@@ -488,6 +521,15 @@ __global__ void kTileBounds(int nTiles, const ereal* sx, const ereal* sy,
                             const unsigned char* ssilent,
                             ereal* lo, ereal* hi)
 {
+    // Batch dimension.  gridDim.y is the candidate count; single-candidate
+    // launches leave blockIdx.y at 0, so every offset below is zero and the
+    // kernel is byte-identical to the unbatched path.  Only quantities that
+    // depend on the conformation are strided; radii and silent flags are shared.
+    {
+        const size_t k = blockIdx.y, nPad = (size_t)nTiles * TILE;
+        sx += k * nPad; sy += k * nPad; sz += k * nPad;
+        lo += k * (size_t)nTiles * 3; hi += k * (size_t)nTiles * 3;
+    }
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= nTiles) return;
 
@@ -526,6 +568,11 @@ __global__ void kOccupancy(int nTiles,
                            energyParams p, ereal v43, int occModel,
                            ereal* __restrict__ occ)
 {
+    {
+        const size_t k = blockIdx.y, nPad = (size_t)nTiles * TILE;
+        sx += k * nPad; sy += k * nPad; sz += k * nPad; occ += k * nPad;
+        tileLo += k * (size_t)nTiles * 3; tileHi += k * (size_t)nTiles * 3;
+    }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK], shR[BLOCK], shV[BLOCK];
 
     const int warp = threadIdx.x / TILE;
@@ -618,6 +665,13 @@ __global__ void kEnergy(int nTiles,
                         ereal* __restrict__ eSolvP, ereal* __restrict__ eSolvN,
                         ereal* __restrict__ eSolvS)
 {
+    {
+        const size_t k = blockIdx.y, nPad = (size_t)nTiles * TILE;
+        sx += k * nPad; sy += k * nPad; sz += k * nPad; occ += k * nPad;
+        tileLo += k * (size_t)nTiles * 3; tileHi += k * (size_t)nTiles * 3;
+        eVdw += k * nPad; eEle += k * nPad; eSolvP += k * nPad;
+        eSolvN += k * nPad; eSolvS += k * nPad;
+    }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK];
     __shared__ ereal shR[BLOCK], shE[BLOCK], shQ[BLOCK], shD[BLOCK];
     __shared__ int   shRes[BLOCK], shOrig[BLOCK];
@@ -939,6 +993,11 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     // but never exceeds this capacity because cellSize is raised if it would.
     ctx->cellCapacity = std::max(64, 4 * N);
 
+    ctx->batchCap = 0;
+    ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
+    ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
+    ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
+
     bool ok = true;
     ok &= devAlloc(&ctx->d_rad, N)      && devAlloc(&ctx->d_sqrtEps, N);
     ok &= devAlloc(&ctx->d_chg, N)      && devAlloc(&ctx->d_selfVol, N);
@@ -1062,7 +1121,9 @@ void energyDestroy(energyContext* ctx)
         ctx->d_eVdw, ctx->d_eEle, ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS,
         ctx->d_clash, ctx->d_cellOf, ctx->d_cellCount, ctx->d_cellStart,
         ctx->d_cellCursor,
-        ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds
+        ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds,
+        ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+        ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
@@ -1284,6 +1345,140 @@ int energyCompute(energyContext* ctx,
                   double* totalOut, energyBreakdown* breakdown)
 {
     return energyComputeImpl(ctx, x, y, z, totalOut, breakdown, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Host: batched candidate evaluation
+// ---------------------------------------------------------------------------
+//
+// A protein-sized system leaves the GPU almost entirely idle -- a 600-atom
+// protein is ~19 warps on 1280 cores, about 5% occupancy -- so evaluating one
+// candidate conformation costs very nearly what evaluating many costs.  This
+// turns that idle capacity into throughput by giving every kernel a candidate
+// dimension on blockIdx.y.
+//
+// All candidates share the spatial order built from the context's current
+// resident coordinates.  That is exact (the order only drives AABB culling) and
+// it keeps radii, charges, residue indices, exclusions and silent flags
+// batch-invariant.  Callers should set the base conformation with
+// energySetCoords before calling, so the order reflects a representative
+// geometry; candidates that differ by a single sidechain will cull as well
+// against the base order as against their own.
+//
+// The host reduction is the same Kahan sum in original atom order used by the
+// single-candidate path, applied per candidate, so a batched energy is
+// bit-identical to the same conformation evaluated alone.
+static bool ensureBatch(energyContext* ctx, int nCand)
+{
+    if (nCand <= ctx->batchCap) return true;
+
+    void* old[] = { ctx->d_bx, ctx->d_by, ctx->d_bz,
+                    ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+                    ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms };
+    for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); ++i)
+        if (old[i]) cudaFree(old[i]);
+    ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
+    ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
+    ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
+    ctx->batchCap = 0;
+
+    const size_t K = (size_t)nCand, N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
+    bool ok = true;
+    ok &= devAlloc(&ctx->d_bx,  K * N)    && devAlloc(&ctx->d_by, K * N)
+       && devAlloc(&ctx->d_bz,  K * N);
+    ok &= devAlloc(&ctx->d_bsx, K * nPad) && devAlloc(&ctx->d_bsy, K * nPad)
+       && devAlloc(&ctx->d_bsz, K * nPad);
+    ok &= devAlloc(&ctx->d_bocc, K * nPad);
+    ok &= devAlloc(&ctx->d_btileLo, K * nT * 3) && devAlloc(&ctx->d_btileHi, K * nT * 3);
+    ok &= devAlloc(&ctx->d_bterms, K * nPad * 5);
+    if (!ok) return false;
+
+    ctx->h_bx.resize(K * N); ctx->h_by.resize(K * N); ctx->h_bz.resize(K * N);
+    ctx->h_bterms.resize(K * nPad * 5);
+    ctx->batchCap = nCand;
+    return true;
+}
+
+int energyComputeBatch(energyContext* ctx, int nCand,
+                       const double* x, const double* y, const double* z,
+                       double* totals)
+{
+    if (!ctx || nCand <= 0 || !x || !y || !z || !totals) return -1;
+    const int N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
+
+    if (buildOrder(ctx) != 0) return -1;
+    if (!ensureBatch(ctx, nCand)) { ctx->lastError = "batch allocation failed"; return -1; }
+
+    const size_t KN = (size_t)nCand * N;
+    for (size_t i = 0; i < KN; ++i) {
+        ctx->h_bx[i] = ereal(x[i]); ctx->h_by[i] = ereal(y[i]); ctx->h_bz[i] = ereal(z[i]);
+    }
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_bx, &ctx->h_bx[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_by, &ctx->h_by[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_bz, &ctx->h_bz[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+
+    ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
+              ? ereal(4.188) : ereal(4.1887902048);
+
+    dim3 gGather((nPad + 255) / 256, nCand);
+    kGatherCoords<<<gGather, 256>>>(nPad, N, ctx->d_order,
+                                    ctx->d_bx, ctx->d_by, ctx->d_bz,
+                                    ctx->d_bsx, ctx->d_bsy, ctx->d_bsz);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    dim3 gTile((nT + 127) / 128, nCand);
+    kTileBounds<<<gTile, 128>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+                                ctx->d_srad, ctx->d_ssilent,
+                                ctx->d_btileLo, ctx->d_btileHi);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    CUDA_OK(ctx, cudaMemset(ctx->d_bocc, 0, (size_t)nCand * nPad * sizeof(ereal)));
+
+    dim3 gWork((nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK, nCand);
+    kOccupancy<<<gWork, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+                                 ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
+                                 ctx->d_btileLo, ctx->d_btileHi,
+                                 ctx->p, v43, ctx->p.occupancy, ctx->d_bocc);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    const size_t stride = (size_t)nCand * nPad;
+    ereal* t0 = ctx->d_bterms;
+    kEnergy<<<gWork, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+                              ctx->d_srad, ctx->d_ssqrtEps, ctx->d_schg,
+                              ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
+                              ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi,
+                              ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
+                              ctx->d_exclSpan, ctx->p, v43,
+                              t0, t0 + stride, t0 + 2 * stride,
+                              t0 + 3 * stride, t0 + 4 * stride);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    CUDA_OK(ctx, cudaMemcpy(&ctx->h_bterms[0], ctx->d_bterms,
+                            stride * 5 * sizeof(ereal), cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpy(ctx->h_order, ctx->d_sorig, nPad * sizeof(int),
+                            cudaMemcpyDeviceToHost));
+
+    for (int k = 0; k < nCand; ++k) {
+        double total = 0.0;
+        for (int t = 0; t < 5; ++t) {
+            std::fill(ctx->perAtom.begin(), ctx->perAtom.end(), 0.0);
+            const ereal* src = &ctx->h_bterms[(size_t)t * stride + (size_t)k * nPad];
+            for (int sIdx = 0; sIdx < nPad; ++sIdx) {
+                int oi = ctx->h_order[sIdx];
+                if (oi >= 0) ctx->perAtom[oi] = double(src[sIdx]);
+            }
+            double sum = 0.0, c = 0.0;
+            for (int i = 0; i < N; ++i) {
+                double yv = ctx->perAtom[i] - c;
+                double tt = sum + yv;
+                c = (tt - sum) - yv;
+                sum = tt;
+            }
+            total += sum;
+        }
+        totals[k] = total;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
