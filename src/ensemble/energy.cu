@@ -97,8 +97,18 @@ struct energyContext
     int   *d_exclCount, *d_exclList;
     int    exclStride;
 
-    // Coordinates, original order.
+    // Coordinates, original order.  These are the canonical state: callers may
+    // upload once and then mutate them on the device across many evaluations.
     ereal *d_x, *d_y, *d_z;
+
+    // Snapshot for cheap accept/reject in a Monte Carlo loop.
+    ereal *d_xSave, *d_ySave, *d_zSave;
+    bool   haveSnapshot;
+    bool   coordsValid;
+
+    // Device-side coordinate bounds, so a resident evaluation never has to
+    // read coordinates back to the host just to size the grid.
+    ereal *d_bounds;     // 6: minX,minY,minZ,maxX,maxY,maxZ
 
     // Sorted (tile) order.
     int   *d_order;      // sorted slot -> original index
@@ -691,6 +701,43 @@ __global__ void kEnergy(int nTiles,
 }
 
 // ---------------------------------------------------------------------------
+// Coordinate bounds
+// ---------------------------------------------------------------------------
+
+// Single-block min/max reduction over the resident coordinates.  Keeping this
+// on the device is what allows a whole minimisation trajectory to run without
+// the coordinates ever touching host memory.
+__global__ void kBounds(int N, const ereal* __restrict__ x,
+                        const ereal* __restrict__ y,
+                        const ereal* __restrict__ z,
+                        ereal* __restrict__ out)
+{
+    __shared__ ereal sLo[3][256], sHi[3][256];
+    const int t = threadIdx.x;
+    ereal lo[3] = { ereal(1e30),  ereal(1e30),  ereal(1e30) };
+    ereal hi[3] = { ereal(-1e30), ereal(-1e30), ereal(-1e30) };
+    for (int i = t; i < N; i += blockDim.x) {
+        ereal v[3] = { x[i], y[i], z[i] };
+        for (int d = 0; d < 3; ++d) {
+            if (v[d] < lo[d]) lo[d] = v[d];
+            if (v[d] > hi[d]) hi[d] = v[d];
+        }
+    }
+    for (int d = 0; d < 3; ++d) { sLo[d][t] = lo[d]; sHi[d][t] = hi[d]; }
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (t < s)
+            for (int d = 0; d < 3; ++d) {
+                if (sLo[d][t + s] < sLo[d][t]) sLo[d][t] = sLo[d][t + s];
+                if (sHi[d][t + s] > sHi[d][t]) sHi[d][t] = sHi[d][t + s];
+            }
+        __syncthreads();
+    }
+    if (t == 0)
+        for (int d = 0; d < 3; ++d) { out[d] = sLo[d][0]; out[3 + d] = sHi[d][0]; }
+}
+
+// ---------------------------------------------------------------------------
 // Shell state export
 // ---------------------------------------------------------------------------
 
@@ -872,6 +919,12 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ok &= devAlloc(&ctx->d_cellCount, ctx->cellCapacity);
     ok &= devAlloc(&ctx->d_cellStart, ctx->cellCapacity);
     ok &= devAlloc(&ctx->d_cellCursor, ctx->cellCapacity);
+    ok &= devAlloc(&ctx->d_xSave, N);
+    ok &= devAlloc(&ctx->d_ySave, N);
+    ok &= devAlloc(&ctx->d_zSave, N);
+    ok &= devAlloc(&ctx->d_bounds, 6);
+    ctx->haveSnapshot = false;
+    ctx->coordsValid  = false;
 
     ok &= cudaMallocHost((void**)&ctx->h_x, N * sizeof(ereal)) == cudaSuccess;
     ok &= cudaMallocHost((void**)&ctx->h_y, N * sizeof(ereal)) == cudaSuccess;
@@ -944,7 +997,8 @@ void energyDestroy(energyContext* ctx)
         ctx->d_ssilent, ctx->d_tileLo, ctx->d_tileHi, ctx->d_occ,
         ctx->d_eVdw, ctx->d_eEle, ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS,
         ctx->d_clash, ctx->d_cellOf, ctx->d_cellCount, ctx->d_cellStart,
-        ctx->d_cellCursor
+        ctx->d_cellCursor,
+        ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
@@ -974,24 +1028,43 @@ void energySetSilent(energyContext* ctx, const unsigned char* silent)
 
 // Uploads coordinates, bins atoms, sorts them into tile order and computes tile
 // bounding boxes.  Returns 0 on success.
-static int buildOrder(energyContext* ctx,
-                      const double* x, const double* y, const double* z)
+// Upload host coordinates into the resident device state.
+static int uploadCoords(energyContext* ctx,
+                        const double* x, const double* y, const double* z)
 {
-    const int N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
-
-    ereal loX = ereal(1e30), loY = ereal(1e30), loZ = ereal(1e30);
-    ereal hiX = ereal(-1e30), hiY = ereal(-1e30), hiZ = ereal(-1e30);
+    const int N = ctx->N;
     for (int i = 0; i < N; ++i) {
-        ereal xi = ereal(x[i]), yi = ereal(y[i]), zi = ereal(z[i]);
-        ctx->h_x[i] = xi; ctx->h_y[i] = yi; ctx->h_z[i] = zi;
-        loX = std::min(loX, xi); hiX = std::max(hiX, xi);
-        loY = std::min(loY, yi); hiY = std::max(hiY, yi);
-        loZ = std::min(loZ, zi); hiZ = std::max(hiZ, zi);
+        ctx->h_x[i] = ereal(x[i]);
+        ctx->h_y[i] = ereal(y[i]);
+        ctx->h_z[i] = ereal(z[i]);
     }
-
     CUDA_OK(ctx, cudaMemcpy(ctx->d_x, ctx->h_x, N * sizeof(ereal), cudaMemcpyHostToDevice));
     CUDA_OK(ctx, cudaMemcpy(ctx->d_y, ctx->h_y, N * sizeof(ereal), cudaMemcpyHostToDevice));
     CUDA_OK(ctx, cudaMemcpy(ctx->d_z, ctx->h_z, N * sizeof(ereal), cudaMemcpyHostToDevice));
+    ctx->coordsValid = true;
+    return 0;
+}
+
+// Rebuild the spatial ordering from whatever is currently in the resident
+// device coordinates.  No host coordinate access at all: the bounds are
+// reduced on the device, and only the six scalars come back.
+static int buildOrder(energyContext* ctx)
+{
+    const int N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
+
+    if (!ctx->coordsValid) {
+        setError(ctx, "buildOrder", "no coordinates have been uploaded",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+
+    kBounds<<<1, 256>>>(N, ctx->d_x, ctx->d_y, ctx->d_z, ctx->d_bounds);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    ereal hb[6];
+    CUDA_OK(ctx, cudaMemcpy(hb, ctx->d_bounds, 6 * sizeof(ereal), cudaMemcpyDeviceToHost));
+    ereal loX = hb[0], loY = hb[1], loZ = hb[2];
+    ereal hiX = hb[3], hiY = hb[4], hiZ = hb[5];
 
     double ex = double(hiX - loX) + 1e-3;
     double ey = double(hiY - loY) + 1e-3;
@@ -1068,7 +1141,8 @@ static int energyComputeImpl(energyContext* ctx,
     if (!ctx) return -1;
     const int nPad = ctx->nPad, nT = ctx->nTiles;
 
-    if (buildOrder(ctx, x, y, z) != 0) return -1;
+    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
+    if (buildOrder(ctx) != 0) return -1;
 
     ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
               ? ereal(4.188) : ereal(4.1887902048);
@@ -1147,6 +1221,73 @@ int energyCompute(energyContext* ctx,
     return energyComputeImpl(ctx, x, y, z, totalOut, breakdown, 0);
 }
 
+// ---------------------------------------------------------------------------
+// Residency
+// ---------------------------------------------------------------------------
+
+static int clashComputeImpl(energyContext* ctx,
+                            const double* x, const double* y, const double* z,
+                            int* clashCountOut, int* perAtomOut);
+
+int energySetCoords(energyContext* ctx,
+                    const double* x, const double* y, const double* z)
+{
+    if (!ctx || !x || !y || !z) return -1;
+    return uploadCoords(ctx, x, y, z);
+}
+
+int energyGetCoords(energyContext* ctx, double* x, double* y, double* z)
+{
+    if (!ctx || !ctx->coordsValid) return -1;
+    const int N = ctx->N;
+    CUDA_OK(ctx, cudaMemcpy(ctx->h_x, ctx->d_x, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpy(ctx->h_y, ctx->d_y, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpy(ctx->h_z, ctx->d_z, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        if (x) x[i] = double(ctx->h_x[i]);
+        if (y) y[i] = double(ctx->h_y[i]);
+        if (z) z[i] = double(ctx->h_z[i]);
+    }
+    return 0;
+}
+
+int energySnapshot(energyContext* ctx)
+{
+    if (!ctx || !ctx->coordsValid) return -1;
+    const int N = ctx->N;
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_xSave, ctx->d_x, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_ySave, ctx->d_y, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_zSave, ctx->d_z, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    ctx->haveSnapshot = true;
+    return 0;
+}
+
+int energyRestore(energyContext* ctx)
+{
+    if (!ctx || !ctx->haveSnapshot) return -1;
+    const int N = ctx->N;
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_x, ctx->d_xSave, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_y, ctx->d_ySave, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_z, ctx->d_zSave, N * sizeof(ereal), cudaMemcpyDeviceToDevice));
+    return 0;
+}
+
+int energyComputeResident(energyContext* ctx, double* totalOut,
+                          energyBreakdown* breakdown, double* perAtomOut)
+{
+    return energyComputeImpl(ctx, 0, 0, 0, totalOut, breakdown, perAtomOut);
+}
+
+int clashComputeResident(energyContext* ctx, int* clashCountOut, int* perAtomOut)
+{
+    return clashComputeImpl(ctx, 0, 0, 0, clashCountOut, perAtomOut);
+}
+
+int shellComputeResident(energyContext* ctx, double* dielectricOut, double* watersOut)
+{
+    return shellCompute(ctx, 0, 0, 0, dielectricOut, watersOut);
+}
+
 int energyComputeAtoms(energyContext* ctx,
                        const double* x, const double* y, const double* z,
                        double* totalOut, energyBreakdown* breakdown,
@@ -1166,7 +1307,8 @@ int shellCompute(energyContext* ctx,
     if (!ctx) return -1;
     const int nPad = ctx->nPad, nT = ctx->nTiles;
 
-    if (buildOrder(ctx, x, y, z) != 0) return -1;
+    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
+    if (buildOrder(ctx) != 0) return -1;
 
     ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
               ? ereal(4.188) : ereal(4.1887902048);
@@ -1213,7 +1355,8 @@ static int clashComputeImpl(energyContext* ctx,
     if (!ctx) return -1;
     const int nPad = ctx->nPad, nT = ctx->nTiles;
 
-    if (buildOrder(ctx, x, y, z) != 0) return -1;
+    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
+    if (buildOrder(ctx) != 0) return -1;
 
     // Bound the tile test by the largest possible contact distance.
     static ereal maxRadSum = ereal(0);
