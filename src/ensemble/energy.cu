@@ -143,6 +143,14 @@ struct energyContext
     int    angleCap;
     ereal *d_angles;
 
+    // Replica states for population Monte Carlo.  Each replica is an
+    // independent walker holding its own accepted conformation.  A step
+    // proposes into the batch buffer, evaluates all replicas in one launch,
+    // and commits only the accepted ones back here.
+    int    replCap;
+    ereal *d_rx, *d_ry, *d_rz;
+    int   *d_groupBegin, *d_nGroups, *d_accept;
+
     // Host staging (pinned).
     ereal *h_x, *h_y, *h_z;
     ereal *h_terms;               // 5 * nPad
@@ -1002,6 +1010,9 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->numGroups = 0; ctx->angleCap = 0;
     ctx->d_axisA = ctx->d_axisB = ctx->d_memberStart = ctx->d_members = 0;
     ctx->d_angles = 0;
+    ctx->replCap = 0;
+    ctx->d_rx = ctx->d_ry = ctx->d_rz = 0;
+    ctx->d_groupBegin = ctx->d_nGroups = ctx->d_accept = 0;
 
     ctx->batchCap = 0;
     ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
@@ -1135,7 +1146,9 @@ void energyDestroy(energyContext* ctx)
         ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
         ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
         ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members,
-        ctx->d_angles
+        ctx->d_angles,
+        ctx->d_rx, ctx->d_ry, ctx->d_rz,
+        ctx->d_groupBegin, ctx->d_nGroups, ctx->d_accept
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
@@ -1460,6 +1473,113 @@ __global__ void kBuildRotamers(int N, int groupBegin, int nGroups,
     }
 }
 
+// Population Monte Carlo proposal.  Identical rotation mathematics to
+// kBuildRotamers, but each replica reads its own accepted state rather than a
+// single shared base, and applies its own rotation-group range, so replicas may
+// be moving different residues on the same launch.  Angles are indexed with a
+// fixed stride so a ragged set of chi counts needs no prefix sum.
+__global__ void kBuildReplicas(int N,
+                               const int* __restrict__ groupBegin,
+                               const int* __restrict__ nGroupsArr,
+                               const ereal* __restrict__ rx,
+                               const ereal* __restrict__ ry,
+                               const ereal* __restrict__ rz,
+                               const int* __restrict__ axisA,
+                               const int* __restrict__ axisB,
+                               const int* __restrict__ memberStart,
+                               const int* __restrict__ members,
+                               const ereal* __restrict__ angles,
+                               int angleStride,
+                               ereal* ox, ereal* oy, ereal* oz)
+{
+    const int k   = blockIdx.x;
+    const int tid = threadIdx.x;
+    const size_t off = (size_t)k * N;
+
+    for (int i = tid; i < N; i += blockDim.x)
+    {
+        ox[off + i] = rx[off + i]; oy[off + i] = ry[off + i]; oz[off + i] = rz[off + i];
+    }
+
+    const int gb = groupBegin[k], ng = nGroupsArr[k];
+
+    for (int g = 0; g < ng; ++g)
+    {
+        __syncthreads();
+
+        const int gi = gb + g;
+        const int i1 = axisA[gi], i2 = axisB[gi];
+
+        const ereal a1x = ox[off + i1], a1y = oy[off + i1], a1z = oz[off + i1];
+        const ereal dx  = ox[off + i2] - a1x;
+        const ereal dy  = oy[off + i2] - a1y;
+        const ereal dz  = oz[off + i2] - a1z;
+
+        const ereal theta = (ereal)0.017453293 * angles[(size_t)k * angleStride + g];
+        const ereal st = sin(theta), ct = cos(theta);
+        const ereal nrm = sqrt(dx * dx + dy * dy + dz * dz);
+        if (nrm <= (ereal)0) continue;
+        const ereal n1 = dx / nrm, n2 = dy / nrm, n3 = dz / nrm;
+        const ereal n11 = n1 * n1, n12 = n1 * n2, n13 = n1 * n3;
+        const ereal n22 = n2 * n2, n23 = n2 * n3, n33 = n3 * n3;
+        const ereal omc = (ereal)1 - ct;
+
+        const ereal r00 = n11 + ((ereal)1 - n11) * ct;
+        const ereal r01 = n12 * omc - n3 * st;
+        const ereal r02 = n13 * omc + n2 * st;
+        const ereal r10 = n12 * omc + n3 * st;
+        const ereal r11 = n22 + ((ereal)1 - n22) * ct;
+        const ereal r12 = n23 * omc - n1 * st;
+        const ereal r20 = n13 * omc - n2 * st;
+        const ereal r21 = n23 * omc + n1 * st;
+        const ereal r22 = n33 + ((ereal)1 - n33) * ct;
+
+        const int s = memberStart[gi], e = memberStart[gi + 1];
+        for (int m = s + tid; m < e; m += blockDim.x)
+        {
+            const int a = members[m];
+            const ereal px = ox[off + a] - a1x;
+            const ereal py = oy[off + a] - a1y;
+            const ereal pz = oz[off + a] - a1z;
+            ox[off + a] = r00 * px + r01 * py + r02 * pz + a1x;
+            oy[off + a] = r10 * px + r11 * py + r12 * pz + a1y;
+            oz[off + a] = r20 * px + r21 * py + r22 * pz + a1z;
+        }
+    }
+}
+
+// Commit accepted proposals.  Rejected replicas keep their previous state, so
+// a rejection costs nothing beyond the evaluation already performed.
+__global__ void kCommitReplicas(int N, const int* __restrict__ accept,
+                                const ereal* __restrict__ bx,
+                                const ereal* __restrict__ by,
+                                const ereal* __restrict__ bz,
+                                ereal* rx, ereal* ry, ereal* rz)
+{
+    const int k = blockIdx.x;
+    if (!accept[k]) return;
+    const size_t off = (size_t)k * N;
+    for (int i = threadIdx.x; i < N; i += blockDim.x)
+    {
+        rx[off + i] = bx[off + i]; ry[off + i] = by[off + i]; rz[off + i] = bz[off + i];
+    }
+}
+
+__global__ void kSeedReplicas(int N, int nRepl,
+                              const ereal* __restrict__ x0,
+                              const ereal* __restrict__ y0,
+                              const ereal* __restrict__ z0,
+                              ereal* rx, ereal* ry, ereal* rz)
+{
+    const int k = blockIdx.x;
+    if (k >= nRepl) return;
+    const size_t off = (size_t)k * N;
+    for (int i = threadIdx.x; i < N; i += blockDim.x)
+    {
+        rx[off + i] = x0[i]; ry[off + i] = y0[i]; rz[off + i] = z0[i];
+    }
+}
+
 static bool ensureBatch(energyContext* ctx, int nCand)
 {
     if (nCand <= ctx->batchCap) return true;
@@ -1668,6 +1788,135 @@ int energyComputeRotamerBatch(energyContext* ctx, int nCand,
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     return evalBatch(ctx, nCand, totals);
+}
+
+// ---------------------------------------------------------------------------
+// Population Monte Carlo over replica states
+// ---------------------------------------------------------------------------
+//
+// The batch kernel does not care whether its candidates are competing proposals
+// for one walker or one proposal each from many independent walkers.
+// Best-of-K spends K evaluations to advance a single chain by one step;
+// replicas spend the same K evaluations to advance K chains by one step each --
+// identical GPU cost for K times the search.  Only the bookkeeping differs, and
+// it lives here.
+//
+// The spatial order is still seeded from the resident coordinates rather than
+// from any individual replica.  That stays correct as replicas diverge, since
+// per-candidate tile bounds are recomputed every launch and the cull is
+// conservative, but it does get slower as tile membership loses spatial
+// coherence.  With a frozen backbone the drift is bounded to sidechain motion;
+// if the backbone is ever released, reseed the order periodically.
+
+int energySetReplicas(energyContext* ctx, int nRepl)
+{
+    if (!ctx || nRepl <= 0) return -1;
+    if (!ctx->coordsValid) { ctx->lastError = "no resident coordinates"; return -1; }
+
+    const size_t N = ctx->N;
+    if (nRepl > ctx->replCap)
+    {
+        void* old[] = { ctx->d_rx, ctx->d_ry, ctx->d_rz,
+                        ctx->d_groupBegin, ctx->d_nGroups, ctx->d_accept };
+        for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); ++i)
+            if (old[i]) cudaFree(old[i]);
+        ctx->d_rx = ctx->d_ry = ctx->d_rz = 0;
+        ctx->d_groupBegin = ctx->d_nGroups = ctx->d_accept = 0;
+        ctx->replCap = 0;
+
+        bool ok = devAlloc(&ctx->d_rx, (size_t)nRepl * N)
+               && devAlloc(&ctx->d_ry, (size_t)nRepl * N)
+               && devAlloc(&ctx->d_rz, (size_t)nRepl * N)
+               && devAlloc(&ctx->d_groupBegin, (size_t)nRepl)
+               && devAlloc(&ctx->d_nGroups, (size_t)nRepl)
+               && devAlloc(&ctx->d_accept, (size_t)nRepl);
+        if (!ok) { ctx->lastError = "replica allocation failed"; return -1; }
+        ctx->replCap = nRepl;
+    }
+
+    kSeedReplicas<<<nRepl, 256>>>((int)N, nRepl, ctx->d_x, ctx->d_y, ctx->d_z,
+                                  ctx->d_rx, ctx->d_ry, ctx->d_rz);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    CUDA_OK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+int energyComputeReplicaBatch(energyContext* ctx, int nRepl,
+                              const int* groupBegin, const int* nGroups,
+                              const double* anglesDeg, int angleStride,
+                              double* totals)
+{
+    if (!ctx || nRepl <= 0 || !totals || !groupBegin || !nGroups) return -1;
+    if (nRepl > ctx->replCap) { ctx->lastError = "replicas not initialised"; return -1; }
+    if (angleStride < 0) return -1;
+    if (angleStride > 0 && !anglesDeg) return -1;
+
+    for (int k = 0; k < nRepl; ++k)
+    {
+        if (nGroups[k] < 0 || nGroups[k] > angleStride)
+            { ctx->lastError = "replica group count exceeds angle stride"; return -1; }
+        if (groupBegin[k] < 0 || groupBegin[k] + nGroups[k] > ctx->numGroups)
+            { ctx->lastError = "replica rotation group range out of bounds"; return -1; }
+    }
+
+    const int N = ctx->N;
+    if (buildOrder(ctx) != 0) return -1;
+    if (!ensureBatch(ctx, nRepl)) { ctx->lastError = "batch allocation failed"; return -1; }
+
+    const int stride = angleStride > 0 ? angleStride : 1;
+    const size_t nAng = (size_t)nRepl * stride;
+    if ((int)nAng > ctx->angleCap) {
+        if (ctx->d_angles) cudaFree(ctx->d_angles);
+        ctx->d_angles = 0; ctx->angleCap = 0;
+        if (!devAlloc(&ctx->d_angles, nAng)) { ctx->lastError = "angle allocation failed"; return -1; }
+        ctx->angleCap = (int)nAng;
+    }
+    if (angleStride > 0) {
+        std::vector<ereal> h(nAng);
+        for (size_t i = 0; i < nAng; ++i) h[i] = ereal(anglesDeg[i]);
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_angles, &h[0], nAng * sizeof(ereal), cudaMemcpyHostToDevice));
+    }
+
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_groupBegin, groupBegin, nRepl * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_nGroups,    nGroups,    nRepl * sizeof(int), cudaMemcpyHostToDevice));
+
+    kBuildReplicas<<<nRepl, 256>>>(N, ctx->d_groupBegin, ctx->d_nGroups,
+                                   ctx->d_rx, ctx->d_ry, ctx->d_rz,
+                                   ctx->d_axisA, ctx->d_axisB,
+                                   ctx->d_memberStart, ctx->d_members,
+                                   ctx->d_angles, stride,
+                                   ctx->d_bx, ctx->d_by, ctx->d_bz);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    return evalBatch(ctx, nRepl, totals);
+}
+
+int energyCommitReplicas(energyContext* ctx, int nRepl, const int* accept)
+{
+    if (!ctx || nRepl <= 0 || !accept) return -1;
+    if (nRepl > ctx->replCap) { ctx->lastError = "replicas not initialised"; return -1; }
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_accept, accept, nRepl * sizeof(int), cudaMemcpyHostToDevice));
+    kCommitReplicas<<<nRepl, 256>>>(ctx->N, ctx->d_accept,
+                                    ctx->d_bx, ctx->d_by, ctx->d_bz,
+                                    ctx->d_rx, ctx->d_ry, ctx->d_rz);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    CUDA_OK(ctx, cudaDeviceSynchronize());
+    return 0;
+}
+
+int energyGetReplicaCoords(energyContext* ctx, int k, double* x, double* y, double* z)
+{
+    if (!ctx || k < 0 || k >= ctx->replCap || !x || !y || !z) return -1;
+    const int N = ctx->N;
+    std::vector<ereal> t(N);
+    const size_t off = (size_t)k * N;
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_rx + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) x[i] = double(t[i]);
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_ry + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) y[i] = double(t[i]);
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_rz + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) z[i] = double(t[i]);
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
