@@ -418,17 +418,38 @@ __global__ void kPlace(const int* cellOf, int N, int* cursor, int* order)
 // ranks are a permutation so the scatter is race-free.  Cells are not capacity
 // bounded, so a cell too large for the staging buffer falls back to the old
 // serial path rather than silently truncating.
+#define SORT_CELL_SMEM 1024
+
 __global__ void kSortCells(const int* cellStart, const int* cellCount,
                            int nCells, int* order)
 {
-    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ int buf[SORT_CELL_SMEM];
+
+    int c = blockIdx.x;
     if (c >= nCells) return;
-    int s = cellStart[c], n = cellCount[c];
-    for (int a = 1; a < n; ++a) {
-        int key = order[s + a];
-        int b = a - 1;
-        while (b >= 0 && order[s + b] > key) { order[s + b + 1] = order[s + b]; --b; }
-        order[s + b + 1] = key;
+    const int s = cellStart[c], n = cellCount[c];
+    if (n < 2) return;
+
+    if (n > SORT_CELL_SMEM) {
+        if (threadIdx.x == 0) {
+            for (int a = 1; a < n; ++a) {
+                int key = order[s + a];
+                int b = a - 1;
+                while (b >= 0 && order[s + b] > key) { order[s + b + 1] = order[s + b]; --b; }
+                order[s + b + 1] = key;
+            }
+        }
+        return;
+    }
+
+    for (int a = threadIdx.x; a < n; a += blockDim.x) buf[a] = order[s + a];
+    __syncthreads();
+
+    for (int a = threadIdx.x; a < n; a += blockDim.x) {
+        const int key = buf[a];
+        int rank = 0;
+        for (int b = 0; b < n; ++b) rank += (buf[b] < key);
+        order[s + rank] = key;
     }
 }
 
@@ -1152,7 +1173,7 @@ static int buildOrder(energyContext* ctx)
     kPlace<<<gridN, 256>>>(ctx->d_cellOf, N, ctx->d_cellCursor, ctx->d_order);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
-    kSortCells<<<(nCells + 127) / 128, 128>>>(ctx->d_cellStart, ctx->d_cellCount,
+    kSortCells<<<nCells, 128>>>(ctx->d_cellStart, ctx->d_cellCount,
                                 nCells, ctx->d_order);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
