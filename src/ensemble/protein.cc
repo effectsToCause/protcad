@@ -1771,7 +1771,25 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 	double bestEnergy = startEnergy; bool haveBest = false;
 	vector <double> bestX(N), bestY(N), bestZ(N);
 
-	srand(time(NULL));
+	// Proposal knobs, exposed so the proposal itself can be A/B tested at a
+	// fixed sweep budget. Defaults reproduce the shipped behavior exactly.
+	//
+	//   PROTCAD_MC_HOP       fraction of trials that are discrete +/-120 deg
+	//                        rotamer hops. Set to 0 to isolate the incremental
+	//                        proposal's quality with no barrier crossing.
+	//   PROTCAD_MC_PROPOSAL  "onechi" perturbs a single randomly chosen chi;
+	//                        "allchi" perturbs every chi of the residue at once,
+	//                        which is what randContinuousSidechainConformation
+	//                        does and makes acceptance decay exponentially in
+	//                        chi count.
+	//   PROTCAD_MC_SEED      fixes the RNG seed. Needed because time(NULL) makes
+	//                        replicates launched in the same second identical.
+	double hopFraction = 0.20;
+	if (const char* h = getenv("PROTCAD_MC_HOP")) {hopFraction = atof(h);}
+	bool allChi = false;
+	if (const char* pm = getenv("PROTCAD_MC_PROPOSAL")) {allChi = (string(pm) == "allchi");}
+	if (const char* sd = getenv("PROTCAD_MC_SEED")) {srand((unsigned)atoi(sd));}
+	else {srand(time(NULL));}
 
 	for (UInt sweep = 0; sweep < _sweeps; sweep++)
 	{
@@ -1794,20 +1812,25 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 
 			groupBegin[k] = begin; nGroups[k] = count;
 
-			const int j = rand() % count;
-			int distal = count - j; if (distal < 2) {distal = 2;}
-			const double span = 180.0 / distal;
+			const int jFixed = rand() % count;
+			for (int j = 0; j < count; j++)
+			{
+				if (!allChi && j != jFixed) {continue;}
 
-			double delta;
-			if ((rand() / (double)RAND_MAX) < 0.20)
-			{
-				delta = (rand() % 2) ? 120.0 : -120.0;
+				int distal = count - j; if (distal < 2) {distal = 2;}
+				const double span = 180.0 / distal;
+
+				double delta;
+				if ((rand() / (double)RAND_MAX) < hopFraction)
+				{
+					delta = (rand() % 2) ? 120.0 : -120.0;
+				}
+				else
+				{
+					delta = 2.0 * span * (rand() / (double)RAND_MAX - 0.5);
+				}
+				angles[(size_t)k * stride + j] = delta;
 			}
-			else
-			{
-				delta = 2.0 * span * (rand() / (double)RAND_MAX - 0.5);
-			}
-			angles[(size_t)k * stride + j] = delta;
 		}
 
 		if (energyReplicaBatch(P, &groupBegin[0], &nGroups[0], &angles[0], stride, &trial[0]) != 0)
