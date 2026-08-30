@@ -78,6 +78,30 @@ static System makeSystem(int N)
     return s;
 }
 
+// Emulate a disulfide: move two atoms that are far apart in sequence to within
+// covalent distance of each other and exclude the pair.  Without an exact
+// exclusion reach the kernel drops these and the r^-12 term explodes, so this
+// case fails loudly rather than subtly.
+static void addCrossLinks(System& s, int numLinks)
+{
+    int stridePairs = s.N / (numLinks + 1);
+    for (int L = 0; L < numLinks; ++L) {
+        int i = L * stridePairs;
+        int j = s.N - 1 - L * stridePairs;
+        if (i >= j) break;
+        if (s.resIndex[i] == s.resIndex[j]) continue;
+        if (s.exclCount[i] >= s.stride || s.exclCount[j] >= s.stride) continue;
+        // Park the pair well outside the lattice so the only close contact in
+        // play is the cross-link itself.  Otherwise the signal is buried under
+        // incidental overlap with whatever the moved atom landed on.
+        double ox = -50.0 - 10.0 * L;
+        s.x[i] = ox;        s.y[i] = 0.0; s.z[i] = 0.0;
+        s.x[j] = ox + 2.05; s.y[j] = 0.0; s.z[j] = 0.0;
+        s.exclList[(size_t)i * s.stride + s.exclCount[i]++] = j;
+        s.exclList[(size_t)j * s.stride + s.exclCount[j]++] = i;
+    }
+}
+
 // --- CPU reference, mirroring the device model exactly -----------------------
 
 struct Shell { double waters, fraction, eps, capacity; };
@@ -130,10 +154,12 @@ static double switchFnH(double d2, double d0sq, double d1sq)
     return u * u * (3 - 2 * u);
 }
 
-static bool excludedH(const System& s, int i, int j, int span)
+// The reference deliberately applies no sequence-separation gate: an entry in
+// the exclusion list is excluded, full stop.  The kernel's per-atom span bound
+// is an optimisation, and this oracle exists to catch it dropping a pair --
+// which is exactly how long-range disulfide exclusions were once being lost.
+static bool excludedH(const System& s, int i, int j, int)
 {
-    int dr = s.resIndex[i] - s.resIndex[j]; if (dr < 0) dr = -dr;
-    if (dr > span) return false;
     for (int k = 0; k < s.exclCount[i]; ++k)
         if (s.exclList[(size_t)i * s.stride + k] == j) return true;
     return false;
@@ -247,9 +273,11 @@ static void report(const char* what, double got, double want, double tol)
            what, got, want, rel, ok ? "ok" : "FAIL");
 }
 
-static void runCase(int N, const energyParams& p, const char* label, double tol)
+static void runCase(int N, const energyParams& p, const char* label, double tol,
+                    int crossLinks = 0)
 {
     System s = makeSystem(N);
+    if (crossLinks > 0) addCrossLinks(s, crossLinks);
     energyTopology t;
     t.numAtoms = N; t.radius = &s.rad[0]; t.epsilon = &s.eps[0];
     t.charge = &s.chg[0]; t.residueIndex = &s.resIndex[0];
@@ -326,6 +354,11 @@ int main()
 
     energyParams bn = def; bn.bornNormalize = 0;
     runCase(1000, bn, "born-raw-count", tol);
+
+    // Long-range covalent cross-links (disulfide analogue).
+    runCase(1000, def, "crosslink", tol, 4);
+    runCase(3000, def, "crosslink", tol, 8);
+    runCase(1000, leg, "crosslink-legacy", tol, 4);
 
     printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: all checks passed (%d failures)\n",
            failures);

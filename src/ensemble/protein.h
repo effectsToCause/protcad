@@ -227,11 +227,14 @@ public:
 	double protEnergyCU();
 	int getNumClashesCU();
 	void buildEnergyContext();
+	int itsDisulfideCount;
 	// Override the model used by the next buildEnergyContext().  Intended for
 	// validation and ablation; call freeDeviceMemAll() first to force a rebuild.
 	void setEnergyParamsOverride(const energyParams& _p);
 	int updateDeviceCoords();
 	bool protEnergyBreakdownCU(energyBreakdown& _out);
+	// Number of disulfide cross-links removed from the nonbonded sum.
+	int getDisulfideCount() const {return itsDisulfideCount;}
 	void protRelaxCU(UInt _plateau, bool _backbone);
 	void protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains);
 	void protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains);
