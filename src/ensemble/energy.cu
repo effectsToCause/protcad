@@ -134,6 +134,14 @@ struct energyContext
     ereal *d_bsx, *d_bsy, *d_bsz;
     ereal *d_bocc, *d_btileLo, *d_btileHi;
     ereal *d_bterms;
+
+    // Per-chunk pair-term slices for the j-split energy launch, and the split
+    // factor itself.  jSplit is a function of the tile count alone, never of
+    // the candidate count, so a batched evaluation and a resident one group
+    // their sums identically and stay bit-comparable.
+    ereal *d_part;
+    int    partCap;      // candidates the partial buffer is sized for
+    int    jSplit;
     std::vector<ereal> h_bx, h_by, h_bz, h_bterms;
 
     // Rotation groups for on-device candidate generation.  CSR: group g rotates
@@ -675,17 +683,24 @@ __global__ void kEnergy(int nTiles,
                         const int* __restrict__ exclCount,
                         const int* __restrict__ exclList, int exclStride,
                         const int* __restrict__ exclSpan,
-                        energyParams p, ereal v43,
+                        energyParams p, ereal v43, int nCand, int jSplit,
                         ereal* __restrict__ eVdw, ereal* __restrict__ eEle,
                         ereal* __restrict__ eSolvP, ereal* __restrict__ eSolvN,
                         ereal* __restrict__ eSolvS)
 {
+    // blockIdx.z partitions the j-tile loop. Each chunk accumulates the pair
+    // terms for its own stride of j into a separate slice, and a following
+    // reduction sums the slices in fixed chunk order, so the result stays
+    // deterministic. Only the pair terms need this; the solvation terms are
+    // functions of the atom's own occupancy, so chunk 0 writes them once.
+    const int chunk = blockIdx.z;
     {
         const size_t k = blockIdx.y, nPad = (size_t)nTiles * TILE;
         sx += k * nPad; sy += k * nPad; sz += k * nPad; occ += k * nPad;
         tileLo += k * (size_t)nTiles * 3; tileHi += k * (size_t)nTiles * 3;
-        eVdw += k * nPad; eEle += k * nPad; eSolvP += k * nPad;
-        eSolvN += k * nPad; eSolvS += k * nPad;
+        eVdw += ((size_t)chunk * nCand + k) * nPad;
+        eEle += ((size_t)chunk * nCand + k) * nPad;
+        eSolvP += k * nPad; eSolvN += k * nPad; eSolvS += k * nPad;
     }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK];
     __shared__ ereal shR[BLOCK], shE[BLOCK], shQ[BLOCK], shD[BLOCK];
@@ -717,7 +732,7 @@ __global__ void kEnergy(int nTiles,
     ereal accVdw = ereal(0), accEle = ereal(0);
     const int base = warp * TILE;
 
-    for (int jTile = 0; jTile < nTiles; ++jTile)
+    for (int jTile = chunk; jTile < nTiles; jTile += jSplit)
     {
         ereal d2 = boxBoxDist2(aLoX, aLoY, aLoZ, aHiX, aHiY, aHiZ,
                                tileLo[jTile * 3 + 0], tileLo[jTile * 3 + 1], tileLo[jTile * 3 + 2],
@@ -776,12 +791,15 @@ __global__ void kEnergy(int nTiles,
     }
 
     if (!active) {
-        eVdw[s] = eEle[s] = eSolvP[s] = eSolvN[s] = eSolvS[s] = ereal(0);
+        eVdw[s] = eEle[s] = ereal(0);
+        if (chunk == 0) eSolvP[s] = eSolvN[s] = eSolvS[s] = ereal(0);
         return;
     }
 
     eVdw[s] = p.vdwScale  * accVdw;
     eEle[s] = p.elecScale * accEle;
+
+    if (chunk != 0) return;
 
     // --- solvation, one evaluation per atom ---
     // The original folded this into the i==j diagonal of an N^2 launch, which
@@ -809,6 +827,32 @@ __global__ void kEnergy(int nTiles,
     {
         eSolvP[s] = eSolvN[s] = eSolvS[s] = ereal(0);
     }
+}
+
+// Sum the per-chunk pair-term slices produced by kEnergy into the final
+// per-atom arrays.  Each thread owns one (candidate, atom) slot and walks the
+// chunks in increasing index order, so the summation order is fixed and the
+// result is reproducible.  With jSplit == 1 this degenerates to a copy and the
+// values are bit-identical to an unsplit kernel.
+__global__ void kReduceParts(int nCand, int nPad, int jSplit,
+                             const ereal* __restrict__ part,
+                             ereal* __restrict__ eVdw,
+                             ereal* __restrict__ eEle)
+{
+    const size_t total = (size_t)nCand * nPad;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    const ereal* pv = part;
+    const ereal* pe = part + (size_t)jSplit * total;
+
+    ereal sv = ereal(0), se = ereal(0);
+    for (int c = 0; c < jSplit; ++c)
+    {
+        sv += pv[(size_t)c * total + idx];
+        se += pe[(size_t)c * total + idx];
+    }
+    eVdw[idx] = sv; eEle[idx] = se;
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,6 +1059,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_groupBegin = ctx->d_nGroups = ctx->d_accept = 0;
 
     ctx->batchCap = 0;
+    ctx->d_part = 0; ctx->partCap = 0; ctx->jSplit = 0;
     ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
@@ -1145,6 +1190,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds,
         ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
         ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
+        ctx->d_part,
         ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members,
         ctx->d_angles,
         ctx->d_rx, ctx->d_ry, ctx->d_rz,
@@ -1283,6 +1329,61 @@ static int buildOrder(energyContext* ctx)
 // Host: energy
 // ---------------------------------------------------------------------------
 
+// Choose how finely to split the j-tile loop.
+//
+// One warp per i-tile means the energy pass offers only nTiles * nCand warps
+// of parallelism.  That fills a GPU when nCand is large, but minimisation
+// wants a small population -- energy at a fixed wall budget is monotone in
+// sweeps-per-chain, so the default is four replicas -- and four candidates on
+// a 44-tile protein produce 176 warps, which does not.  Splitting j recovers
+// the parallelism without touching the sampler.
+//
+// Measured on the P2200, warm clocks, kEnergy us/candidate:
+//
+//   1ubq (nTiles 44, nCand 4)    split 1: 255.8   4: 222.9   8: 224.5   32: 249.9
+//   1crn (nTiles 10, nCand 4)    split 1: 304.0   4: 129.6   8: 106.3   32: 119.8
+//
+// The gain is large where it was most needed and the optimum sits near 8 in
+// both cases, so the rule caps there; past that the duplicated i-side setup
+// (including the occupancy shell lookup, repeated once per chunk) eats the
+// benefit.  For reference 1ubq at nCand=64 costs 183.3 us/candidate, so the
+// small-population penalty was 1.40x and the split removes about half of it.
+// Note that these numbers are only meaningful warm: the first launch after an
+// idle GPU runs at reduced clocks and reads ~45% slow, which briefly made this
+// deficit look like 2.2x.
+//
+// The factor depends only on nTiles.  That matters: if it varied with nCand,
+// a batched evaluation and a single resident one would group their float sums
+// differently and stop agreeing bit for bit, which is what batchTest and
+// replicaTest exist to check.
+static int chooseSplit(energyContext* ctx)
+{
+    if (ctx->jSplit > 0) return ctx->jSplit;
+    int s = 0;
+    if (const char* e = getenv("PROTCAD_ENERGY_JSPLIT")) s = atoi(e);
+    if (s <= 0)
+    {
+        const int TARGET_WARPS = 800;
+        s = (TARGET_WARPS + ctx->nTiles - 1) / std::max(1, ctx->nTiles);
+    }
+    if (s > ctx->nTiles) s = ctx->nTiles;
+    if (s > 8) s = 8;
+    if (s < 1) s = 1;
+    ctx->jSplit = s;
+    return s;
+}
+
+static bool ensurePart(energyContext* ctx, int nCand)
+{
+    const int jSplit = chooseSplit(ctx);
+    if (ctx->d_part && nCand <= ctx->partCap) return true;
+    if (ctx->d_part) { cudaFree(ctx->d_part); ctx->d_part = 0; ctx->partCap = 0; }
+    const size_t need = (size_t)2 * jSplit * (size_t)nCand * ctx->nPad;
+    if (!devAlloc(&ctx->d_part, need)) return false;
+    ctx->partCap = nCand;
+    return true;
+}
+
 static int energyComputeImpl(energyContext* ctx,
                              const double* x, const double* y, const double* z,
                              double* totalOut, energyBreakdown* breakdown,
@@ -1307,16 +1408,31 @@ static int energyComputeImpl(energyContext* ctx,
                                   ctx->p, v43, ctx->p.occupancy, ctx->d_occ);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
-    kEnergy<<<blocks, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+    if (!ensurePart(ctx, 1)) {
+        setError(ctx, "energyComputeImpl", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    const int jSplit = ctx->jSplit;
+    dim3 gEnergy(blocks, 1, jSplit);
+    kEnergy<<<gEnergy, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
                                ctx->d_srad, ctx->d_ssqrtEps, ctx->d_schg,
                                ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
                                ctx->d_occ, ctx->d_tileLo, ctx->d_tileHi,
                                ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
                                ctx->d_exclSpan,
-                               ctx->p, v43,
-                               ctx->d_eVdw, ctx->d_eEle, ctx->d_eSolvP,
+                               ctx->p, v43, 1, jSplit,
+                               ctx->d_part,
+                               ctx->d_part + (size_t)jSplit * nPad,
+                               ctx->d_eSolvP,
                                ctx->d_eSolvN, ctx->d_eSolvS);
     CUDA_OK(ctx, cudaPeekAtLastError());
+    {
+        int rb = (int)((nPad + 255) / 256);
+        kReduceParts<<<rb, 256>>>(1, nPad, jSplit, ctx->d_part,
+                                  ctx->d_eVdw, ctx->d_eEle);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
 
     ereal* h = ctx->h_terms;
     CUDA_OK(ctx, cudaMemcpy(h + 0 * nPad, ctx->d_eVdw,   nPad * sizeof(ereal), cudaMemcpyDeviceToHost));
@@ -1621,8 +1737,9 @@ static bool ensureBatch(energyContext* ctx, int nCand)
 // share of the batch cost, so measure before optimising.
 struct batchProfile
 {
-    double kernels, copy, reduce; long calls; long cands;
-    batchProfile() : kernels(0), copy(0), reduce(0), calls(0), cands(0) {}
+    double gather, tile, occ, energy, copy, reduce; long calls; long cands;
+    batchProfile() : gather(0), tile(0), occ(0), energy(0), copy(0), reduce(0),
+                     calls(0), cands(0) {}
 };
 static batchProfile g_bprof;
 static int g_bprofOn = -1;
@@ -1636,22 +1753,21 @@ static double profWall()
 static void profReport()
 {
     if (!g_bprof.calls) return;
-    double tot = g_bprof.kernels + g_bprof.copy + g_bprof.reduce;
+    double tot = g_bprof.gather + g_bprof.tile + g_bprof.occ + g_bprof.energy
+               + g_bprof.copy + g_bprof.reduce;
     if (tot <= 0) return;
-    fprintf(stderr,
-            "\n[energy] evalBatch profile: %ld calls, %ld candidates\n"
-            "  kernels    %8.3f s  %5.1f%%   %8.1f us/cand\n"
-            "  D2H copy   %8.3f s  %5.1f%%   %8.1f us/cand\n"
-            "  host Kahan %8.3f s  %5.1f%%   %8.1f us/cand\n"
-            "  total      %8.3f s          %8.1f us/cand\n",
-            g_bprof.calls, g_bprof.cands,
-            g_bprof.kernels, 100.0 * g_bprof.kernels / tot,
-            1e6 * g_bprof.kernels / std::max(1L, g_bprof.cands),
-            g_bprof.copy, 100.0 * g_bprof.copy / tot,
-            1e6 * g_bprof.copy / std::max(1L, g_bprof.cands),
-            g_bprof.reduce, 100.0 * g_bprof.reduce / tot,
-            1e6 * g_bprof.reduce / std::max(1L, g_bprof.cands),
-            tot, 1e6 * tot / std::max(1L, g_bprof.cands));
+    const long nc = std::max(1L, g_bprof.cands);
+    fprintf(stderr, "\n[energy] evalBatch profile: %ld calls, %ld candidates\n",
+            g_bprof.calls, g_bprof.cands);
+    const char* nm[6] = {"kGatherCoords", "kTileBounds", "kOccupancy",
+                         "kEnergy", "D2H copy", "host Kahan"};
+    double vv[6] = {g_bprof.gather, g_bprof.tile, g_bprof.occ,
+                    g_bprof.energy, g_bprof.copy, g_bprof.reduce};
+    for (int i = 0; i < 6; ++i)
+        fprintf(stderr, "  %-14s %8.3f s  %5.1f%%   %8.1f us/cand\n",
+                nm[i], vv[i], 100.0 * vv[i] / tot, 1e6 * vv[i] / nc);
+    fprintf(stderr, "  %-14s %8.3f s          %8.1f us/cand\n",
+            "total", tot, 1e6 * tot / nc);
 }
 
 static bool profEnabled()
@@ -1679,11 +1795,15 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                                     ctx->d_bsx, ctx->d_bsy, ctx->d_bsz);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
+    double tGather = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
+
     dim3 gTile((nT + 127) / 128, nCand);
     kTileBounds<<<gTile, 128>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
                                 ctx->d_srad, ctx->d_ssilent,
                                 ctx->d_btileLo, ctx->d_btileHi);
     CUDA_OK(ctx, cudaPeekAtLastError());
+
+    double tTile = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
 
     CUDA_OK(ctx, cudaMemset(ctx->d_bocc, 0, (size_t)nCand * nPad * sizeof(ereal)));
 
@@ -1694,17 +1814,35 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                                  ctx->p, v43, ctx->p.occupancy, ctx->d_bocc);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
+    double tOcc = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
+
     const size_t stride = (size_t)nCand * nPad;
     ereal* t0 = ctx->d_bterms;
-    kEnergy<<<gWork, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+    if (!ensurePart(ctx, nCand)) {
+        setError(ctx, "evalBatch", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    const int jSplit = ctx->jSplit;
+    dim3 gEnergy((nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK, nCand, jSplit);
+    kEnergy<<<gEnergy, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
                               ctx->d_srad, ctx->d_ssqrtEps, ctx->d_schg,
                               ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
                               ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi,
                               ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
-                              ctx->d_exclSpan, ctx->p, v43,
-                              t0, t0 + stride, t0 + 2 * stride,
-                              t0 + 3 * stride, t0 + 4 * stride);
+                              ctx->d_exclSpan, ctx->p, v43, nCand, jSplit,
+                              ctx->d_part,
+                              ctx->d_part + (size_t)jSplit * stride,
+                              t0 + 2 * stride, t0 + 3 * stride, t0 + 4 * stride);
     CUDA_OK(ctx, cudaPeekAtLastError());
+
+    {
+        const size_t tot = stride;
+        int rb = (int)((tot + 255) / 256);
+        kReduceParts<<<rb, 256>>>(nCand, nPad, jSplit, ctx->d_part,
+                                  t0, t0 + stride);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
 
     double tB = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
 
@@ -1738,7 +1876,10 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
     if (prof)
     {
         double tD = profWall();
-        g_bprof.kernels += tB - tA;
+        g_bprof.gather  += tGather - tA;
+        g_bprof.tile    += tTile - tGather;
+        g_bprof.occ     += tOcc - tTile;
+        g_bprof.energy  += tB - tOcc;
         g_bprof.copy    += tC - tB;
         g_bprof.reduce  += tD - tC;
         g_bprof.calls   += 1;
