@@ -1720,13 +1720,29 @@ int protein::maxRotationGroupCount() const
 //     P=1  -1223 | P=2  -1213 | P=4  -1215 | P=8  -1191
 //     P=16 -1180 | P=32 -1158 | P=64 -1090 | P=128 -1019
 //
-// Monotone in depth, with no interior optimum. P=4 is the efficiency point,
-// reaching -1215 in 28 s. For reference the pre-batching single-candidate path
-// using randContinuousSidechainConformation reaches -1158 in 47 s, so P=4 beats
-// it by 57 kcal/mol in 60% of the wall time -- but P=64, the original default
-// here, loses to it badly. Callers minimising a structure should pass a small
-// P. Large P remains the right choice for sampling an ensemble, which is a
-// different objective and is not what this routine is usually asked for.
+// Monotone in depth, with no interior optimum. That sweep set the budget by
+// calibration and the realised wall times drifted by a factor of nearly two,
+// so it could rank the large-P settings but could not separate P=1, 2 and 4.
+// Read on its face it made P=4 look like an efficiency point.
+//
+// A direct matched-wall test settles it. Six seeds, ~25 s each, paired by
+// seed, on the j-split kernels:
+//
+//     P=1  -1234.7 (25.8 s) | P=2  -1212.0 (25.5 s) | P=4  -1210.2 (23.8 s)
+//     paired vs P=1:   P=2  +22.6 +- 7.9 (t 2.9)   P=4  +24.4 +- 6.4 (t 3.8)
+//
+// P=1 wins, and it wins while the comparison is tilted against it -- it took
+// 8% more wall than P=4, worth about 5 kcal/mol at the measured slope of 59
+// kcal per e-fold of budget, so the corrected penalty for P=4 is still around
+// 20 kcal/mol. So the population is not merely unnecessary for minimisation,
+// it is mildly harmful: every candidate beyond the first buys breadth the
+// accept/reject rule cannot use, and pays for it in depth.
+//
+// The default is therefore one replica. Large P remains the right choice for
+// sampling an ensemble, which is a different objective and is not what this
+// routine is usually asked for. For reference the pre-batching single-
+// candidate path using randContinuousSidechainConformation reaches -1158 in
+// 47 s, which P=1 now beats by ~77 kcal/mol in about half the time.
 //
 // Two deliberate departures from randContinuousSidechainConformation:
 //
