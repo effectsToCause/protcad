@@ -97,6 +97,15 @@ struct energyContext
     int   *d_exclCount, *d_exclList, *d_exclSpan;
     int    exclStride;
 
+    // Dihedrals, one entry per Fourier term.  Fixed topology, so these are
+    // uploaded once and never touched again.
+    int    nTor;
+    int   *d_torAtoms;
+    ereal *d_torBarrier, *d_torPhase, *d_torPeriod;
+    ereal *d_torE;                // nTor * torCap, per-term energies
+    int    torCap;                // candidates d_torE is sized for
+    std::vector<ereal> h_torE;
+
     // Coordinates, original order.  These are the canonical state: callers may
     // upload once and then mutate them on the device across many evaluations.
     ereal *d_x, *d_y, *d_z;
@@ -228,6 +237,23 @@ energyParams defaultEnergyParams()
     p.vdwScale  = ereal(1.0);
     p.elecScale = ereal(1.0);
 
+    p.torsionScale = 1.0;
+    p.elec14Scale  = 1.0 / 1.2;   // Amber SCEE
+    p.vdw14Scale   = 1.0 / 2.0;   // Amber SCNB
+
+    // Single-lever off switch for the bonded term.  Torsions and 1-4 scaling
+    // move together and never separately: the ff14SB barriers were fitted with
+    // the 1-4 terms damped by exactly SCEE/SCNB, so turning off one and not the
+    // other uses the parameters outside the fit that produced them.  Zeroing
+    // the 1-4 scales reverts those pairs to full exclusion, which is what the
+    // potential did before this term existed.
+    if (getenv("PROTCAD_TORSION_OFF"))
+    {
+        p.torsionScale = 0.0;
+        p.elec14Scale  = 0.0;
+        p.vdw14Scale   = 0.0;
+    }
+
     // Isotropic hard-clash test.  The legacy cube criterion is retained as
     // CLASH_INSCRIBED_CUBE for CPU-parity checks, but it is orientation
     // dependent and so unusable as a physical quantity; see energy.h.
@@ -250,6 +276,14 @@ energyParams legacyEnergyParams()
     p.bornNormalize  = 0;   // legacy scales the Born term by the raw water count
     p.clash          = CLASH_SPHERE;
     p.clashTolerance = 1.0;   // legacy GPU flagged any pair inside rI+rJ
+
+    // No dihedral term, and 1-4 pairs excluded outright rather than damped.
+    // These two go together: the ff14SB barriers were fitted against scaled
+    // 1-4 interactions, so turning one off without the other is not a
+    // reproduction of anything.
+    p.torsionScale = 0.0;
+    p.elec14Scale  = 0.0;
+    p.vdw14Scale   = 0.0;
     return p;
 }
 
@@ -269,12 +303,16 @@ __device__ __forceinline__ ereal emax(ereal a, ereal b) { return fmax(a, b); }
 __device__ __forceinline__ ereal emin(ereal a, ereal b) { return fmin(a, b); }
 __device__ __forceinline__ ereal eabs(ereal a)   { return fabs(a); }
 __device__ __forceinline__ ereal etrunc(ereal a) { return trunc(a); }
+__device__ __forceinline__ ereal ecos(ereal a)   { return cos(a); }
+__device__ __forceinline__ ereal eatan2(ereal a, ereal b) { return atan2(a, b); }
 #else
 __device__ __forceinline__ ereal esqrt(ereal a)  { return sqrtf(a); }
 __device__ __forceinline__ ereal emax(ereal a, ereal b) { return fmaxf(a, b); }
 __device__ __forceinline__ ereal emin(ereal a, ereal b) { return fminf(a, b); }
 __device__ __forceinline__ ereal eabs(ereal a)   { return fabsf(a); }
 __device__ __forceinline__ ereal etrunc(ereal a) { return truncf(a); }
+__device__ __forceinline__ ereal ecos(ereal a)   { return cosf(a); }
+__device__ __forceinline__ ereal eatan2(ereal a, ereal b) { return atan2f(a, b); }
 #endif
 
 __device__ __forceinline__ ereal cube(ereal a) { return a * a * a; }
@@ -381,7 +419,14 @@ __device__ __forceinline__ ereal boxBoxDist2(
     return dx * dx + dy * dy + dz * dz;
 }
 
-__device__ __forceinline__ bool isExcluded(
+// Returns 0 for a normal pair, 1 for a fully excluded one (1-2 or 1-3), and 2
+// for a 1-4 pair, which Amber damps rather than removes.
+//
+// The two cases share one list.  A 1-4 partner is stored as -(j+1), which is
+// unambiguous because atom indices are non-negative, and costs nothing: the
+// scan already had to compare every entry.  Keeping one list preserves the
+// stride, the memory traffic and the per-atom span bound exactly as they were.
+__device__ __forceinline__ int exclusionCode(
     int origI, int origJ, int resI, int resJ, const int* exclSpan,
     const int* exclCount, const int* exclList, int stride)
 {
@@ -394,13 +439,87 @@ __device__ __forceinline__ bool isExcluded(
     // -1 and reject immediately, so the common case is as cheap as before.
     int dr = resI - resJ;
     if (dr < 0) dr = -dr;
-    if (dr > exclSpan[origI]) return false;
+    if (dr > exclSpan[origI]) return 0;
 
     int n = exclCount[origI];
     const int* list = exclList + (size_t)origI * stride;
-    for (int k = 0; k < n; ++k)
-        if (list[k] == origJ) return true;
-    return false;
+    for (int k = 0; k < n; ++k) {
+        int e = list[k];
+        if (e == origJ) return 1;
+        if (e == -(origJ + 1)) return 2;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Dihedrals
+// ---------------------------------------------------------------------------
+
+// One thread per (term, candidate).  Terms are stored one per Fourier
+// component, so a four-term series is four independent threads over the same
+// quartet and the kernel has no inner loop and no divergence.
+//
+// The energy is written per term rather than accumulated, because accumulating
+// would need atomics and atomics reorder floating point additions.  Every
+// reduction in this file is ordered so that two evaluations of the same
+// conformation agree bit for bit; that property is what lets the batch and
+// resident paths be compared at all, and it is not worth trading for the
+// memory this costs (one float per term per candidate).
+__global__ void kTorsion(const ereal* __restrict__ x,
+                         const ereal* __restrict__ y,
+                         const ereal* __restrict__ z,
+                         int N, int nCand, int nTor,
+                         const int* __restrict__ tAtoms,
+                         const ereal* __restrict__ tBarrier,
+                         const ereal* __restrict__ tPhase,
+                         const ereal* __restrict__ tPeriod,
+                         ereal scale,
+                         ereal* __restrict__ out)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int k = blockIdx.y;
+    if (t >= nTor || k >= nCand) return;
+
+    const ereal* cx = x + (size_t)k * N;
+    const ereal* cy = y + (size_t)k * N;
+    const ereal* cz = z + (size_t)k * N;
+
+    int ia = tAtoms[4 * t + 0], ib = tAtoms[4 * t + 1];
+    int ic = tAtoms[4 * t + 2], id = tAtoms[4 * t + 3];
+
+    // b1 x b2 and b2 x b3 give the two half-plane normals; the torsion is the
+    // angle between them, signed by b2.  Using atan2 of (n1 x n2).b2hat and
+    // n1.n2 rather than acos of a normalised dot product keeps the full range
+    // and stays well conditioned near 0 and pi, where acos loses most of its
+    // significant digits to the vanishing derivative.
+    ereal b1x = cx[ib] - cx[ia], b1y = cy[ib] - cy[ia], b1z = cz[ib] - cz[ia];
+    ereal b2x = cx[ic] - cx[ib], b2y = cy[ic] - cy[ib], b2z = cz[ic] - cz[ib];
+    ereal b3x = cx[id] - cx[ic], b3y = cy[id] - cy[ic], b3z = cz[id] - cz[ic];
+
+    ereal n1x = b1y * b2z - b1z * b2y;
+    ereal n1y = b1z * b2x - b1x * b2z;
+    ereal n1z = b1x * b2y - b1y * b2x;
+
+    ereal n2x = b2y * b3z - b2z * b3y;
+    ereal n2y = b2z * b3x - b2x * b3z;
+    ereal n2z = b2x * b3y - b2y * b3x;
+
+    ereal b2len = esqrt(b2x * b2x + b2y * b2y + b2z * b2z);
+    if (b2len <= ereal(0)) { out[(size_t)k * nTor + t] = ereal(0); return; }
+
+    ereal mx = n1y * n2z - n1z * n2y;
+    ereal my = n1z * n2x - n1x * n2z;
+    ereal mz = n1x * n2y - n1y * n2x;
+
+    ereal sy = (mx * b2x + my * b2y + mz * b2z) / b2len;
+    ereal sxv = n1x * n2x + n1y * n2y + n1z * n2z;
+
+    ereal phi = eatan2(sy, sxv);
+
+    // E = (PK/IDIVF) * (1 + cos(n*phi - phase)); the divisor is already folded
+    // into the barrier on the host.
+    ereal e = tBarrier[t] * (ereal(1) + ecos(tPeriod[t] * phi - tPhase[t]));
+    out[(size_t)k * nTor + t] = scale * e;
 }
 
 // ---------------------------------------------------------------------------
@@ -765,9 +884,17 @@ __global__ void kEnergy(int nTiles,
                 ereal r2 = dx * dx + dy * dy + dz * dz;
                 if (r2 >= cutSq) continue;
 
-                if (isExcluded(origI, shOrig[base + k], resI, shRes[base + k],
-                               exclSpan, exclCount, exclList, exclStride))
-                    continue;
+                int xcode = exclusionCode(origI, shOrig[base + k], resI,
+                                          shRes[base + k], exclSpan, exclCount,
+                                          exclList, exclStride);
+                if (xcode == 1) continue;
+
+                // 1-4 pairs survive at reduced weight.  In legacy mode both
+                // factors are zero, which reproduces the old outright
+                // exclusion exactly rather than approximately.
+                ereal s14v = (xcode == 2) ? ereal(p.vdw14Scale)  : ereal(1);
+                ereal s14e = (xcode == 2) ? ereal(p.elec14Scale) : ereal(1);
+                if (xcode == 2 && s14v == ereal(0) && s14e == ereal(0)) continue;
 
                 ereal d = esqrt(r2);
                 if (d < minSep) { d = minSep; r2 = d * d; }
@@ -788,8 +915,8 @@ __global__ void kEnergy(int nTiles,
                 // Each pair is visited from both endpoints, so take half here.
                 // Exact in binary arithmetic, and it yields a per-atom energy
                 // decomposition for free.
-                accVdw += ereal(0.5) * sw * vdw;
-                accEle += ereal(0.5) * sw * ele;
+                accVdw += ereal(0.5) * sw * s14v * vdw;
+                accEle += ereal(0.5) * sw * s14e * ele;
             }
         }
         __syncwarp();
@@ -1012,8 +1139,12 @@ __global__ void kClash(int nTiles,
                 }
                 if (!hit) continue;
 
-                if (isExcluded(origI, shOrig[base + k], resI, shRes[base + k],
-                               exclSpan, exclCount, exclList, exclStride))
+                // Any bonded relationship suppresses a clash, 1-4 included.
+                // Three-bond neighbours are held close by the geometry itself
+                // and were never clash candidates; damping their nonbonded
+                // energy does not make them ones.
+                if (exclusionCode(origI, shOrig[base + k], resI, shRes[base + k],
+                                  exclSpan, exclCount, exclList, exclStride))
                     continue;
                 ++acc;
             }
@@ -1056,6 +1187,9 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_silent = ctx->d_ssilent = 0;
     ctx->h_x = ctx->h_y = ctx->h_z = ctx->h_terms = 0;
     ctx->h_order = 0;
+    ctx->nTor = 0; ctx->torCap = 0;
+    ctx->d_torAtoms = 0;
+    ctx->d_torBarrier = ctx->d_torPhase = ctx->d_torPeriod = ctx->d_torE = 0;
 
     ctx->N      = topo.numAtoms;
     ctx->nTiles = (ctx->N + TILE - 1) / TILE;
@@ -1109,6 +1243,32 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ok &= devAlloc(&ctx->d_ySave, N);
     ok &= devAlloc(&ctx->d_zSave, N);
     ok &= devAlloc(&ctx->d_bounds, 6);
+
+    // Dihedrals.  Absent from a topology means simply no bonded term, not an
+    // error: callers that have not been taught to build them still work.
+    if (topo.torsionCount > 0 && topo.torsionAtoms && topo.torsionParams)
+    {
+        const int nTor = topo.torsionCount;
+        ctx->nTor = nTor;
+        ok &= devAlloc(&ctx->d_torAtoms, (size_t)4 * nTor);
+        ok &= devAlloc(&ctx->d_torBarrier, nTor);
+        ok &= devAlloc(&ctx->d_torPhase, nTor);
+        ok &= devAlloc(&ctx->d_torPeriod, nTor);
+        if (ok) {
+            std::vector<ereal> bb(nTor), ph(nTor), pn(nTor);
+            for (int t = 0; t < nTor; ++t) {
+                bb[t] = ereal(topo.torsionParams[3 * t + 0]);
+                ph[t] = ereal(topo.torsionParams[3 * t + 1]);
+                pn[t] = ereal(topo.torsionParams[3 * t + 2]);
+            }
+            cudaMemcpy(ctx->d_torAtoms, topo.torsionAtoms,
+                       (size_t)4 * nTor * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(ctx->d_torBarrier, &bb[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
+            cudaMemcpy(ctx->d_torPhase,   &ph[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
+            cudaMemcpy(ctx->d_torPeriod,  &pn[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
+        }
+    }
+
     ctx->haveSnapshot = false;
     ctx->coordsValid  = false;
 
@@ -1170,7 +1330,11 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
                 int best = -1;
                 const int* list = topo.exclusionList + (size_t)i * ctx->exclStride;
                 for (int k = 0; k < topo.exclusionCount[i]; ++k) {
-                    int dr = topo.residueIndex[i] - topo.residueIndex[list[k]];
+                    // 1-4 partners are stored as -(j+1); decode before use, or
+                    // the span is computed against a negative index and the
+                    // fast reject starts discarding real exclusions.
+                    int j = list[k] < 0 ? -list[k] - 1 : list[k];
+                    int dr = topo.residueIndex[i] - topo.residueIndex[j];
                     if (dr < 0) dr = -dr;
                     if (dr > best) best = dr;
                 }
@@ -1208,6 +1372,8 @@ void energyDestroy(energyContext* ctx)
         ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
         ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
         ctx->d_part,
+        ctx->d_torAtoms, ctx->d_torBarrier, ctx->d_torPhase, ctx->d_torPeriod,
+        ctx->d_torE,
         ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members,
         ctx->d_angles,
         ctx->d_rx, ctx->d_ry, ctx->d_rz,
@@ -1418,6 +1584,55 @@ static int chooseSplit(energyContext* ctx)
     return s;
 }
 
+// Dihedral energies for nCand conformations held in original atom order at
+// (x,y,z).  Returns one total per candidate in tot[].
+//
+// The reduction is on the host in term-index order with Kahan compensation,
+// which is what every other term in this file does and for the same reason:
+// the working precision is single, and the order has to be a property of the
+// topology rather than of the launch geometry or two evaluations of the same
+// structure stop agreeing bit for bit.
+static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
+                         const ereal* z, int nCand, double* tot)
+{
+    const int nTor = ctx->nTor;
+    for (int k = 0; k < nCand; ++k) tot[k] = 0.0;
+    if (nTor <= 0 || ctx->p.torsionScale == 0.0) return 0;
+
+    if (nCand > ctx->torCap) {
+        if (ctx->d_torE) { cudaFree(ctx->d_torE); ctx->d_torE = 0; }
+        if (!devAlloc(&ctx->d_torE, (size_t)nTor * nCand)) {
+            setError(ctx, "torsion", "out of memory", __FILE__, __LINE__);
+            return -1;
+        }
+        ctx->torCap = nCand;
+        ctx->h_torE.resize((size_t)nTor * nCand);
+    }
+
+    dim3 g((nTor + 255) / 256, nCand);
+    kTorsion<<<g, 256>>>(x, y, z, ctx->N, nCand, nTor,
+                         ctx->d_torAtoms, ctx->d_torBarrier,
+                         ctx->d_torPhase, ctx->d_torPeriod,
+                         ereal(ctx->p.torsionScale), ctx->d_torE);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    CUDA_OK(ctx, cudaMemcpy(&ctx->h_torE[0], ctx->d_torE,
+                            (size_t)nTor * nCand * sizeof(ereal),
+                            cudaMemcpyDeviceToHost));
+
+    for (int k = 0; k < nCand; ++k) {
+        const ereal* src = &ctx->h_torE[(size_t)k * nTor];
+        double sum = 0.0, c = 0.0;
+        for (int t = 0; t < nTor; ++t) {
+            double yv = double(src[t]) - c;
+            double tt = sum + yv;
+            c = (tt - sum) - yv;
+            sum = tt;
+        }
+        tot[k] = sum;
+    }
+    return 0;
+}
+
 static bool ensurePart(energyContext* ctx, int nCand)
 {
     const int jSplit = chooseSplit(ctx);
@@ -1530,10 +1745,14 @@ static int energyComputeImpl(energyContext* ctx,
         out[t] = sum;
     }
 
-    double total = out[0] + out[1] + out[2] + out[3] + out[4];
+    double eTor = 0.0;
+    if (torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor) != 0) return -1;
+
+    double total = out[0] + out[1] + out[2] + out[3] + out[4] + eTor;
     if (totalOut) *totalOut = total;
     if (breakdown) {
         breakdown->vdw               = out[0];
+        breakdown->torsion           = eTor;
         breakdown->electrostatic     = out[1];
         breakdown->solvationPolar    = out[2];
         breakdown->solvationNonpolar = out[3];
@@ -1930,8 +2149,12 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
 
     double tC = prof ? profWall() : 0.0;
 
+    std::vector<double> eTor(nCand, 0.0);
+    if (torsionTotals(ctx, ctx->d_bx, ctx->d_by, ctx->d_bz, nCand, &eTor[0]) != 0)
+        return -1;
+
     for (int k = 0; k < nCand; ++k) {
-        double total = 0.0;
+        double total = eTor[k];
         for (int t = 0; t < 5; ++t) {
             std::fill(ctx->perAtom.begin(), ctx->perAtom.end(), 0.0);
             const ereal* src = &ctx->h_bterms[(size_t)t * stride + (size_t)k * nPad];

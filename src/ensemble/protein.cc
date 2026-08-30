@@ -2,6 +2,8 @@
 // contents: class protein implementation
 
 #include "protein.h"
+#include "amberParams.h"
+#include <set>
 bool protein::messagesActive = false;
 typedef vector<UInt>::iterator iterUINT;
 typedef vector<int>::iterator iterINT;
@@ -1196,14 +1198,6 @@ void protein::setEnergyParamsOverride(const energyParams& _p)
 	itsEnergyParams = _p; itsEnergyParamsSet = true;
 }
 
-// Add a symmetric nonbonded exclusion, skipping duplicates.
-static void addExclusionPair(vector< vector<int> >& _excl, int _i, int _j)
-{
-	for (UInt k = 0; k < _excl[_i].size(); k++) {if (_excl[_i][k] == _j) {return;}}
-	_excl[_i].push_back(_j);
-	_excl[_j].push_back(_i);
-}
-
 void protein::buildEnergyContext()
 {
 	if (itsEnergyContext) {return;}
@@ -1258,62 +1252,108 @@ void protein::buildEnergyContext()
 	if (N <= 0) {return;}
 	const int numRes = int(resPtr.size());
 
-	// Exclusions, gathered per atom over a +/-1 residue window.  The window is
-	// sufficient for backbone connectivity, but NOT for covalent cross-links:
-	// a disulfide joins two cysteines that are arbitrarily far apart in
-	// sequence, and its SG-SG pair sits at ~2.0 A while the vdW Rmin for two
-	// sulfurs is 4.0 A.  Left in the nonbonded sum that single pair contributes
-	// on the order of 1e3 kcal/mol through the r^-12 term.  Cross-links are
-	// therefore handled by a separate geometric pass after this loop.
-	const int WINDOW = 1;
-	vector< vector<int> > excl(N);
-	for (int ri = 0; ri < numRes; ri++)
+	// ---------------------------------------------------------------
+	// Covalent bond graph.
+	//
+	// Exclusions used to be derived from residue::isSeparatedByFewBonds and a
+	// +/-1 residue window, which answers "are these within three bonds" without
+	// ever materialising the graph.  That was enough while every pair inside
+	// three bonds was simply deleted.  It is not enough now: Amber does not
+	// delete 1-4 pairs, it damps them, so the code has to be able to tell three
+	// bonds from two.  It also has to enumerate dihedrals, which is a question
+	// about the graph and not about any pair.
+	//
+	// Building the graph explicitly answers all three, and it subsumes the
+	// cross-link special case rather than bolting onto it: a disulfide is just
+	// another edge, and 1-4 pairs across it fall out of the same traversal that
+	// produces them everywhere else.  The old code handled 1-2 and 1-3 across a
+	// disulfide by hand and silently missed 1-4.
+	//
+	// Cost is linear.  Degree is at most four, so a depth-3 walk from an atom
+	// reaches at most 1 + 4 + 12 + 36 nodes regardless of protein size.
+	// ---------------------------------------------------------------
+	vector< vector<int> > bonded(N);
+	vector<int> disulfideS;
 	{
-		residue* res1 = resPtr[ri];
-		int lo = (ri - WINDOW > 0) ? ri - WINDOW : 0;
-		int hi = (ri + WINDOW < numRes - 1) ? ri + WINDOW : numRes - 1;
-		for (int ai = 0; ai < resNumAtoms[ri]; ai++)
+		vector<int> sgAtom;
+		// Intra-residue, straight from the amber.prep connectivity.
+		for (int ri = 0; ri < numRes; ri++)
 		{
-			int i = resFirstAtom[ri] + ai;
-			int li = atomLocalIndex[i];
-			for (int rj = lo; rj <= hi; rj++)
+			for (int ai = 0; ai < resNumAtoms[ri]; ai++)
 			{
-				residue* res2 = resPtr[rj];
-				for (int aj = 0; aj < resNumAtoms[rj]; aj++)
+				int i = resFirstAtom[ri] + ai;
+				vector<UInt> nb = resPtr[ri]->getBondedAtoms(UInt(atomLocalIndex[i]));
+				for (UInt k = 0; k < nb.size(); k++)
 				{
-					int j = resFirstAtom[rj] + aj;
-					if (j == i) {continue;}
-					int lj = atomLocalIndex[j];
-					bool bonded;
-					if (ri == rj) {bonded = res1->isSeparatedByFewBonds(li, lj);}
-					else if (resChain[ri] == resChain[rj]) {bonded = res1->isSeparatedByThreeBackboneBonds(li, res2, lj);}
-					else {bonded = false;}
-					if (bonded) {excl[i].push_back(j);}
+					// The bonding pattern is in residue-local indices; map back
+					// through the same enumeration used for coordinates.
+					for (int aj = 0; aj < resNumAtoms[ri]; aj++)
+					{
+						int j = resFirstAtom[ri] + aj;
+						if (atomLocalIndex[j] == int(nb[k]) && j != i)
+						{ bonded[i].push_back(j); break; }
+					}
 				}
 			}
 		}
-	}
 
-	// Covalent cross-links (disulfides), found geometrically.
-	//
-	// residue::isSeparatedByThreeBackboneBonds does contain a disulfide rule,
-	// but it only fires for residues typed CYX/CXD, and it is only consulted
-	// inside the sequence window above.  Structures loaded straight from a PDB
-	// commonly keep bonded cysteines typed as reduced CYS -- crambin's three
-	// disulfides do, hydrogens and all -- so neither guard catches them.
-	// Testing the SG-SG distance directly is independent of residue typing and
-	// of sequence separation, which is what makes it reliable here.
-	//
-	// A real disulfide is ~2.05 A; 2.5 A is comfortably above that and well
-	// below the ~3.5 A of a non-bonded sulfur contact.  Both the 1-2 pair
-	// (SG-SG') and the 1-3 pairs (SG-CB', CB-SG') are removed, matching the
-	// bonded-exclusion set used across the backbone.
-	{
-		vector<int> sgAtom, sgRes;
+		// Peptide bonds.  Consecutive residues of the same chain only, and only
+		// when the C-N distance is actually a bond: a PDB with a chain break
+		// leaves consecutive residue indices metres apart in space, and joining
+		// them would invent a dihedral across the gap.
+		for (int ri = 0; ri + 1 < numRes; ri++)
+		{
+			if (resChain[ri] != resChain[ri + 1]) {continue;}
+			int cAtom = -1, nAtom = -1;
+			for (int k = 0; k < resNumAtoms[ri]; k++)
+			{
+				int i = resFirstAtom[ri] + k;
+				if (resPtr[ri]->getAtom(atomLocalIndex[i])->getName() == "C") {cAtom = i; break;}
+			}
+			for (int k = 0; k < resNumAtoms[ri + 1]; k++)
+			{
+				int i = resFirstAtom[ri + 1] + k;
+				if (resPtr[ri + 1]->getAtom(atomLocalIndex[i])->getName() == "N") {nAtom = i; break;}
+			}
+			if (cAtom < 0 || nAtom < 0)
+			{
+				if (getenv("PROTCAD_TOPO_DEBUG"))
+					cout << "  no C/N for peptide bond " << ri << "->" << ri+1
+					     << " (C=" << cAtom << " N=" << nAtom << ")" << endl;
+				continue;
+			}
+			dblVec ci = resPtr[hres[cAtom]]->getAtom(atomLocalIndex[cAtom])->getCoords();
+			dblVec cj = resPtr[hres[nAtom]]->getAtom(atomLocalIndex[nAtom])->getCoords();
+			double dx = ci[0]-cj[0], dy = ci[1]-cj[1], dz = ci[2]-cj[2];
+			if (dx*dx + dy*dy + dz*dz > 2.0 * 2.0)
+			{
+				if (getenv("PROTCAD_TOPO_DEBUG"))
+					cout << "  peptide bond " << ri << "->" << ri+1 << " too long: "
+					     << sqrt(dx*dx+dy*dy+dz*dz) << " A" << endl;
+				continue;
+			}
+			bonded[cAtom].push_back(nAtom);
+			bonded[nAtom].push_back(cAtom);
+		}
+
+		// Covalent cross-links (disulfides), found geometrically.
+		//
+		// residue::isSeparatedByThreeBackboneBonds does contain a disulfide
+		// rule, but it only fires for residues typed CYX/CXD.  Structures
+		// loaded straight from a PDB commonly keep bonded cysteines typed as
+		// reduced CYS -- crambin's three disulfides do, hydrogens and all -- so
+		// that guard never catches them.  Testing the SG-SG distance is
+		// independent of residue typing and of sequence separation, which is
+		// what makes it reliable.
+		//
+		// A real disulfide is ~2.05 A; 2.5 A is comfortably above that and well
+		// below the ~3.5 A of a non-bonded sulfur contact.  Left in the
+		// nonbonded sum an unexcluded S-S pair at 2.0 A contributes of order
+		// 1e3 kcal/mol through the r^-12 term.
 		for (int i = 0; i < N; i++)
 		{
 			if (resPtr[hres[i]]->getAtom(atomLocalIndex[i])->getName() == "SG")
-			{ sgAtom.push_back(i); sgRes.push_back(hres[i]); }
+			{ sgAtom.push_back(i); }
 		}
 		int numLinks = 0;
 		for (UInt a = 0; a < sgAtom.size(); a++)
@@ -1321,27 +1361,265 @@ void protein::buildEnergyContext()
 			for (UInt b = a + 1; b < sgAtom.size(); b++)
 			{
 				int i = sgAtom[a], j = sgAtom[b];
-				if (sgRes[a] == sgRes[b]) {continue;}
+				if (hres[i] == hres[j]) {continue;}
 				dblVec ci = resPtr[hres[i]]->getAtom(atomLocalIndex[i])->getCoords();
 				dblVec cj = resPtr[hres[j]]->getAtom(atomLocalIndex[j])->getCoords();
 				double dx = ci[0]-cj[0], dy = ci[1]-cj[1], dz = ci[2]-cj[2];
 				if (dx*dx + dy*dy + dz*dz > 2.5 * 2.5) {continue;}
 				numLinks++;
-				addExclusionPair(excl, i, j);
-				// 1-3: each sulfur against the partner's CB.
-				for (int side = 0; side < 2; side++)
+				bonded[i].push_back(j);
+				bonded[j].push_back(i);
+				disulfideS.push_back(i);
+				disulfideS.push_back(j);
+			}
+		}
+		itsDisulfideCount = numLinks;
+	}
+
+	// ---------------------------------------------------------------
+	// Exclusions by graph distance.  1-2 and 1-3 are removed outright; 1-4 is
+	// stored as -(j+1) and damped in the kernel by SCEE/SCNB.
+	// ---------------------------------------------------------------
+	vector< vector<int> > excl(N);
+	{
+		vector<int> dist(N, -1), touched;
+		for (int i = 0; i < N; i++)
+		{
+			touched.clear();
+			dist[i] = 0; touched.push_back(i);
+			vector<int> frontier(1, i);
+			for (int depth = 1; depth <= 3; depth++)
+			{
+				vector<int> next;
+				for (UInt f = 0; f < frontier.size(); f++)
 				{
-					int sSelf = side ? j : i, rOther = side ? sgRes[a] : sgRes[b];
-					for (int k = 0; k < resNumAtoms[rOther]; k++)
+					const vector<int>& nb = bonded[frontier[f]];
+					for (UInt k = 0; k < nb.size(); k++)
 					{
-						int o = resFirstAtom[rOther] + k;
-						if (resPtr[hres[o]]->getAtom(atomLocalIndex[o])->getName() == "CB")
-						{ addExclusionPair(excl, sSelf, o); }
+						int j = nb[k];
+						if (dist[j] >= 0) {continue;}
+						dist[j] = depth; touched.push_back(j); next.push_back(j);
+						excl[i].push_back(depth == 3 ? -(j + 1) : j);
+					}
+				}
+				frontier.swap(next);
+			}
+			for (UInt k = 0; k < touched.size(); k++) {dist[touched[k]] = -1;}
+		}
+	}
+
+	// One-off validation of the exclusion rewrite: recompute the old
+	// window-based set and report the difference.  Kept because the two schemes
+	// answer the same question by different means, so a diff is the cheapest
+	// check that the graph is wired correctly.
+	if (getenv("PROTCAD_TOPO_DEBUG"))
+	{
+		vector< set<int> > oldExcl(N), newExcl(N);
+		const int WINDOW = 1;
+		for (int ri = 0; ri < numRes; ri++)
+		{
+			residue* res1 = resPtr[ri];
+			int lo = (ri - WINDOW > 0) ? ri - WINDOW : 0;
+			int hi = (ri + WINDOW < numRes - 1) ? ri + WINDOW : numRes - 1;
+			for (int ai = 0; ai < resNumAtoms[ri]; ai++)
+			{
+				int i = resFirstAtom[ri] + ai;
+				int li = atomLocalIndex[i];
+				for (int rj = lo; rj <= hi; rj++)
+				{
+					residue* res2 = resPtr[rj];
+					for (int aj = 0; aj < resNumAtoms[rj]; aj++)
+					{
+						int j = resFirstAtom[rj] + aj;
+						if (j == i) {continue;}
+						int lj = atomLocalIndex[j];
+						bool bnd;
+						if (ri == rj) {bnd = res1->isSeparatedByFewBonds(li, lj);}
+						else if (resChain[ri] == resChain[rj]) {bnd = res1->isSeparatedByThreeBackboneBonds(li, res2, lj);}
+						else {bnd = false;}
+						if (bnd) {oldExcl[i].insert(j);}
 					}
 				}
 			}
 		}
-		itsDisulfideCount = numLinks;
+		for (int i = 0; i < N; i++)
+			for (UInt k = 0; k < excl[i].size(); k++)
+				newExcl[i].insert(excl[i][k] < 0 ? -excl[i][k] - 1 : excl[i][k]);
+
+		int onlyOld = 0, onlyNew = 0, both = 0;
+		for (int i = 0; i < N; i++)
+		{
+			for (set<int>::iterator it = oldExcl[i].begin(); it != oldExcl[i].end(); ++it)
+			{
+				if (newExcl[i].count(*it)) {both++;} else {onlyOld++;}
+			}
+			for (set<int>::iterator it = newExcl[i].begin(); it != newExcl[i].end(); ++it)
+			{
+				if (!oldExcl[i].count(*it)) {onlyNew++;}
+			}
+		}
+		cout << "[excl diff] shared " << both / 2
+		     << "  only-old " << onlyOld / 2
+		     << "  only-new " << onlyNew / 2 << endl;
+	}
+
+	// ---------------------------------------------------------------
+	// Dihedrals.
+	//
+	// One quartet per central bond per pair of substituents.  Emitted once,
+	// keyed on b < c, so a-b-c-d and d-c-b-a are not both generated: they are
+	// the same angle and would double the barrier.
+	//
+	// Impropers are added at every atom with exactly three neighbours that has
+	// a matching parameter.  That is the trigonal-centre rule, and on protein
+	// topology it selects the planar groups the impropers exist to keep planar
+	// -- carbonyl carbons, amide nitrogens, aromatic ring carbons -- and
+	// nothing else, because ff14SB simply has no improper for an sp3 centre.
+	// ---------------------------------------------------------------
+	vector<int> torAtoms;
+	vector<double> torParams;
+	{
+		amberParams ff;
+		ff.loadFF14SB();
+
+		vector<string> aType(N);
+		for (int i = 0; i < N; i++)
+			aType[i] = resPtr[hres[i]]->getAmberTypeName(UInt(atomLocalIndex[i]));
+
+		// A sulfur in a disulfide is Amber type S, not the thiol SH.  protcad
+		// finds disulfides geometrically and leaves the residue typed as
+		// reduced CYS, so the type read off the template is the thiol one and
+		// no CT-S-S-CT parameter would ever match.  Retyping here covers the
+		// bonded terms; the nonbonded type is left alone, which is the smaller
+		// error and is not this commit's to fix.
+		//
+		// The same typing failure leaves a thiol hydrogen bonded to a sulfur
+		// that already has two heavy neighbours.  That hydrogen should not
+		// exist.  Torsions through it are dropped rather than invented, since
+		// there is no ff14SB parameter for a three-coordinate sulfur and
+		// guessing one would put a barrier on a bond that is itself spurious.
+		vector<bool> isSS(N, false), spuriousH(N, false);
+		for (UInt k = 0; k < disulfideS.size(); k++)
+		{
+			int sg = disulfideS[k];
+			isSS[sg] = true;
+			aType[sg] = "S";
+			for (UInt m = 0; m < bonded[sg].size(); m++)
+			{
+				int h = bonded[sg][m];
+				if (resPtr[hres[h]]->getAtom(atomLocalIndex[h])->getName()[0] == 'H')
+					{ spuriousH[h] = true; }
+			}
+		}
+		if (!disulfideS.empty() && getenv("PROTCAD_TOPO_DEBUG"))
+		{
+			int nh = 0;
+			for (int i = 0; i < N; i++) {if (spuriousH[i]) {nh++;}}
+			cout << "[topo] retyped " << disulfideS.size() << " disulfide S"
+			     << ", ignoring " << nh << " leftover thiol H in bonded terms" << endl;
+		}
+
+		int missing = 0;
+		for (int b = 0; b < N; b++)
+		{
+			for (UInt kc = 0; kc < bonded[b].size(); kc++)
+			{
+				int c = bonded[b][kc];
+				if (c < b) {continue;}
+				for (UInt ka = 0; ka < bonded[b].size(); ka++)
+				{
+					int a = bonded[b][ka];
+					if (a == c) {continue;}
+					for (UInt kd = 0; kd < bonded[c].size(); kd++)
+					{
+						int d = bonded[c][kd];
+						if (d == b || d == a) {continue;}
+						if (spuriousH[a] || spuriousH[d]) {continue;}
+						const vector<amberTorsionTerm>& t =
+							ff.torsion(aType[a], aType[b], aType[c], aType[d]);
+						if (t.empty())
+						{
+							missing++;
+							if (getenv("PROTCAD_TOPO_DEBUG"))
+							{
+								cout << "  no torsion for " << aType[a] << "-" << aType[b]
+								     << "-" << aType[c] << "-" << aType[d] << endl;
+							}
+							continue;
+						}
+						for (UInt m = 0; m < t.size(); m++)
+						{
+							if (t[m].barrier == 0.0) {continue;}
+							torAtoms.push_back(a); torAtoms.push_back(b);
+							torAtoms.push_back(c); torAtoms.push_back(d);
+							torParams.push_back(t[m].barrier / t[m].divisor);
+							torParams.push_back(t[m].phase);
+							torParams.push_back(t[m].periodicity);
+						}
+					}
+				}
+			}
+		}
+
+		for (int c = 0; c < N; c++)
+		{
+			if (bonded[c].size() != 3) {continue;}
+			if (isSS[c]) {continue;}
+			int a = bonded[c][0], b = bonded[c][1], d = bonded[c][2];
+			const vector<amberTorsionTerm>& t =
+				ff.improper(aType[a], aType[b], aType[c], aType[d]);
+			if (t.empty()) {continue;}
+			for (UInt m = 0; m < t.size(); m++)
+			{
+				if (t[m].barrier == 0.0) {continue;}
+				torAtoms.push_back(a); torAtoms.push_back(b);
+				torAtoms.push_back(c); torAtoms.push_back(d);
+				torParams.push_back(t[m].barrier / t[m].divisor);
+				torParams.push_back(t[m].phase);
+				torParams.push_back(t[m].periodicity);
+			}
+		}
+
+		if (getenv("PROTCAD_TOPO_DEBUG"))
+		{
+			int n12 = 0, n14 = 0, nb2 = 0;
+			for (int i = 0; i < N; i++)
+			{
+				nb2 += int(bonded[i].size());
+				for (UInt k = 0; k < excl[i].size(); k++)
+				{
+					if (excl[i][k] < 0) {n14++;} else {n12++;}
+				}
+			}
+			cout << "[topo] atoms " << N << "  bonds " << nb2 / 2
+			     << "  disulfides " << itsDisulfideCount
+			     << "  excl(1-2,1-3) " << n12 / 2 << "  excl(1-4) " << n14 / 2
+			     << "  torsion terms " << torParams.size() / 3 << endl;
+		}
+
+		if (getenv("PROTCAD_TOPO_DUMP"))
+		{
+			ofstream f(getenv("PROTCAD_TOPO_DUMP"));
+			f.precision(12);
+			for (int i = 0; i < N; i++)
+			{
+				dblVec c = resPtr[hres[i]]->getAtom(atomLocalIndex[i])->getCoords();
+				f << "A " << i << " " << aType[i] << " " << c[0] << " " << c[1] << " " << c[2] << endl;
+			}
+			for (UInt t = 0; t * 4 < torAtoms.size(); t++)
+			{
+				f << "T " << torAtoms[4*t] << " " << torAtoms[4*t+1] << " "
+				  << torAtoms[4*t+2] << " " << torAtoms[4*t+3] << " "
+				  << torParams[3*t] << " " << torParams[3*t+1] << " " << torParams[3*t+2] << endl;
+			}
+			f.close();
+		}
+
+		if (missing > 0)
+		{
+			cout << "protein::buildEnergyContext: " << missing
+			     << " dihedrals had no ff14SB parameters and were dropped" << endl;
+		}
 	}
 
 	// Pack into the fixed-stride form the kernel reads.
@@ -1360,6 +1638,9 @@ void protein::buildEnergyContext()
 	topo.residueIndex = &hres[0]; topo.silent = &hsilent[0];
 	topo.exclusionCount = &hcount[0]; topo.exclusionList = &hlist[0];
 	topo.exclusionStride = stride;
+	topo.torsionCount = int(torParams.size() / 3);
+	topo.torsionAtoms  = torAtoms.empty()  ? 0 : &torAtoms[0];
+	topo.torsionParams = torParams.empty() ? 0 : &torParams[0];
 
 	// Pull the scale factors from the same accessors the CPU path uses rather
 	// than hardcoding them, which is what let the two paths drift apart.

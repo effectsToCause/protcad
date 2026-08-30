@@ -101,6 +101,18 @@ int main()
     // than silently returning something adjacent.
     check(ff.torsion("ZZ", "ZZ", "ZZ", "ZZ").empty(), "unknown torsion is empty");
 
+    // The disulfide torsion.  protein.cc retypes a bonded SG from the thiol
+    // type SH to S before looking bonded parameters up, because protcad finds
+    // disulfides geometrically and leaves the residue typed as reduced CYS.
+    // If this quartet ever stopped resolving, every disulfide in every
+    // structure would silently lose its torsional restraint.
+    {
+        const vector<amberTorsionTerm>& t = ff.torsion("CT", "S", "S", "CT");
+        check(!t.empty(), "disulfide torsion CT-S-S-CT found");
+        check(ff.torsion("SH", "SH", "SH", "SH").empty(),
+              "thiol-typed disulfide quartet has no parameters");
+    }
+
     // IDIVF is carried, not folded in: X-C-CT-X has IDIVF 6.
     {
         const vector<amberTorsionTerm>& t = ff.torsion("X", "C", "CT", "X");
