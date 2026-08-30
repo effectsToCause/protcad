@@ -225,6 +225,7 @@ public:
 	void loadDeviceMemAll();
 	void freeDeviceMemAll();
 	double protEnergyCU();
+	double protEnergyCU(UInt _chainIndex);
 	int getNumClashesCU();
 	void buildEnergyContext();
 	int itsDisulfideCount;

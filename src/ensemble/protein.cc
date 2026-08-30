@@ -2214,6 +2214,44 @@ double protein::protEnergyCU()
 	return e;
 }
 
+// Energy of one chain in isolation.
+//
+// This is deliberately not a sum of that chain's per-atom contributions in the
+// complex.  Those contributions include the interchain terms, which is exactly
+// what a binding energy is defined to remove, so summing them would return the
+// complex energy partitioned rather than the isolated-chain energy and drive
+// the binding energy to zero.  Masking the other chains instead reproduces the
+// CPU convention: evaluate the chain as if nothing else were present.
+//
+// The mask goes through energySetSilent rather than a context rebuild, so the
+// topology, exclusion lists and device allocations are all reused.  The prior
+// silent flags are restored on both the success and failure paths; leaving a
+// chain masked would silently corrupt every later evaluation.
+double protein::protEnergyCU(UInt _chainIndex)
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return 0.0;}
+	vector<unsigned char> base(N, 0), mask(N, 1);
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		residue* pRes = aIter.getResiduePointer();
+		unsigned char s = pRes->getAtom(aIter.getAtomIndex())->getSilentStatus() ? 1 : 0;
+		base[i] = s;
+		mask[i] = (aIter.getChainIndex() == _chainIndex) ? s : 1;
+	}
+	energySetSilent(itsEnergyContext, &mask[0]);
+	double e = 0.0;
+	int rc = energyCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0], &e, 0);
+	energySetSilent(itsEnergyContext, &base[0]);
+	if (rc)
+	{
+		cout << "protein::protEnergyCU(chain) failed: " << energyLastError(itsEnergyContext) << endl;
+		return 0.0;
+	}
+	return e;
+}
+
 // Per-term decomposition, which the original could not provide: it reduced
 // everything into a single accumulator inside the kernel.
 bool protein::protEnergyBreakdownCU(energyBreakdown& _out)
@@ -2580,23 +2618,24 @@ int protein::getNumAtoms()
 }
 
 //**************Default non-Redundant optimized Energy Function***************************************
+// protEnergy is now a thin alias for the CUDA evaluation.
+//
+// The CPU pair-loop that used to live here was not a second opinion on the
+// same model, it was a stale one: it predated the ff14SB radii, the torsion
+// term and the dielectric fix, and on 1crn it returned 4869.34 against the
+// kernel's 523.60.  Keeping both meant every caller silently got whichever
+// physics its author happened to reach for.  The name is kept so the project
+// call sites read unchanged.
 double protein::protEnergy()
 {
-	updateEnergy();
-	double Energy = 0.0;
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		Energy += itsChains[i]->getEnergy();
-	}
-	return Energy;
+	double e = protEnergyCU();
+	E = e;
+	return e;
 }
 
 double protein::protEnergy(UInt chainIndex) //Energy of chain alone
 {
-	setMoved(true,0);
-	updateEnergy(chainIndex);
-	double Energy = itsChains[chainIndex]->getEnergy();
-	return Energy;
+	return protEnergyCU(chainIndex);
 }
 
 void protein::updateEnergy()
@@ -2793,19 +2832,13 @@ void protein::updateClashes()
 	setMoved(false, 1);
 }
 
+// As protEnergy: the clash count now comes from the kernel, which shares the
+// AMBER radius array with the vdW term.  The CPU counter used the older
+// radii, so the two disagreed on which contacts were clashes.
 UInt protein::getNumHardClashes()
 {
-	updateClashes();
-	// Per-residue counts record each inter-residue pair once per partner, so the
-	// participation sum is exactly twice the number of distinct clashing pairs.
-	// Intra-residue pairs are recorded once and are added after the halving.
-	UInt participation = 0, intra = 0;
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		participation += itsChains[i]->getClashes();
-		intra += itsChains[i]->getIntraClashes();
-	}
-	return participation / 2 + intra;
+	int c = getNumClashesCU();
+	return c < 0 ? 0 : (UInt)c;
 }
 
 UInt protein::getNumHardClashes(UInt chainIndex, UInt resIndex)
