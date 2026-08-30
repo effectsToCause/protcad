@@ -271,6 +271,8 @@ public:
 	double calculateHCA_O_hBondEnergy(residue* _other);
 	double getVolume(UInt _method);
 	double getVDWRadius(UInt _index);
+	string getAmberTypeName(UInt _index);
+	vector<UInt> getBondedAtoms(UInt _index);
 	double getVDWEpsilon(UInt _index);
 	double getCharge(UInt _index);
     bool notHydrogen(UInt _atomIndex);

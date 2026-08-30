@@ -367,6 +367,15 @@ double residueTemplate::getVDWRadius(const int _type1)
 	}
 	return 0.0;
 }
+
+// Amber atom type name for an energy type index.  Needed to look up bonded
+// parameters, which are keyed on the type string rather than on protcad's
+// index into amberVDW.frc.
+string residueTemplate::getVDWTypeName(const int _type1)
+{
+	if (_type1 < 0) return string();
+	return itsAmberVDW.getNameFromIndex(UInt(_type1));
+}
 double residueTemplate::getVDWEpsilon(const int _type1)
 {
 	if( _type1 >= 0)

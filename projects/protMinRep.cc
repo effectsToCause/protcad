@@ -55,6 +55,19 @@ int main (int argc, char* argv[])
 	_prot->loadDeviceMemAll();
 	double startE = _prot->protEnergyCU();
 	cout << "Starting Energy: " << startE << " kcal/mol" << endl;
+	if (getenv("PROTCAD_TOPO_DEBUG"))
+	{
+		energyBreakdown bd;
+		if (_prot->protEnergyBreakdownCU(bd))
+		{
+			cout << "[breakdown] vdw " << bd.vdw
+			     << "  torsion " << bd.torsion
+			     << "  elec " << bd.electrostatic
+			     << "  solvP " << bd.solvationPolar
+			     << "  solvN " << bd.solvationNonpolar
+			     << "  solvE " << bd.solvationEntropy << endl;
+		}
+	}
 	cout << "sweeps " << sweeps << "  replicas " << replicas
 	     << "  evaluations " << (double)sweeps * replicas << endl;
 

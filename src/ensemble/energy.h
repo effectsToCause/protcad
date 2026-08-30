@@ -193,6 +193,22 @@ struct energyParams
     double vdwScale;
     double elecScale;
 
+    // --- bonded ---
+    // Scale on the whole dihedral term.  Zero reproduces the behaviour before
+    // torsions existed, which is what legacy mode wants.
+    double torsionScale;
+
+    // 1-4 nonbonded scaling.  Amber does not exclude atoms three bonds apart,
+    // it damps them: 1/1.2 on electrostatics and 1/2.0 on van der Waals.  The
+    // dihedral barriers in ff14SB were fitted with exactly those factors, so
+    // the two are not separable -- applying the torsion parameters on top of a
+    // full 1-4 exclusion uses them outside the fit that produced them.
+    //
+    // Zero here means "exclude 1-4 outright", which is what protcad did
+    // before, so legacy mode sets both to zero along with torsionScale.
+    double elec14Scale;
+    double vdw14Scale;
+
     // --- clash detection ---
     int   clash;                 // clashModel
 
@@ -219,6 +235,7 @@ energyParams legacyEnergyParams();
 struct energyBreakdown
 {
     double vdw;
+    double torsion;
     double electrostatic;
     double solvationPolar;
     double solvationNonpolar;
@@ -256,6 +273,28 @@ struct energyTopology
     const int*           exclusionCount;
     const int*           exclusionList;
     int                  exclusionStride;
+
+    // Dihedrals, flattened one entry per Fourier term rather than per quartet,
+    // so a four-term series is four entries sharing the same atom indices.
+    // Costs a little memory and removes all branching from the kernel.
+    //
+    //   torsionAtoms   4*torsionCount original atom indices, i-j-k-l
+    //   torsionParams  3*torsionCount: barrier already divided by IDIVF,
+    //                  phase in radians, periodicity
+    //
+    // Impropers are carried in the same arrays; they have the same functional
+    // form and differ only in how the quartet was chosen.
+    int                  torsionCount;
+    const int*           torsionAtoms;
+    const double*        torsionParams;
+
+    // Zeroed by default so a caller that predates the torsion term, or a test
+    // that fills only the nonbonded fields, gets no torsions rather than a
+    // count read out of uninitialised stack memory.
+    energyTopology()
+        : numAtoms(0), radius(0), epsilon(0), charge(0), residueIndex(0),
+          silent(0), exclusionCount(0), exclusionList(0), exclusionStride(0),
+          torsionCount(0), torsionAtoms(0), torsionParams(0) {}
 };
 
 // Create a context for a fixed topology.  Returns null on failure.

@@ -25,6 +25,8 @@ public:
     double getWaterEnergy(const UInt _type1) const;
 	double getEnergySQ(const UInt _type1, const UInt _type2, const double _distanceSquared) const;
 	int getIndexFromNameString(string _name);
+	string getNameFromIndex(const UInt _index) const
+		{ return _index < amberAtomTypeNames.size() ? amberAtomTypeNames[_index] : string(); }
 	bool isClash(const UInt _type1, const UInt _type2, const double _distance);
     double getRadius(const UInt _type1);
 	double getEpsilon(const UInt _type1);

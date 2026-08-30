@@ -3308,6 +3308,22 @@ double residue::getVDWRadius(UInt _atomIndex)
 	double Radius = residueTemplate::getVDWRadius(atomVDWtype); //atom radius + water radius
 	return Radius;
 }
+
+// Amber atom type name of an atom, e.g. "CX", "HO".  Bonded parameters are
+// keyed on these strings, unlike the nonbonded ones which protcad indexes.
+string residue::getAmberTypeName(UInt _atomIndex)
+{
+	int t = dataBase[itsType].itsAtomEnergyTypeDefinitions[_atomIndex][0];
+	return residueTemplate::getVDWTypeName(t);
+}
+
+// Atoms covalently bonded to _atomIndex within this residue.  The template's
+// bonding pattern is built from amber.prep, so it is the same connectivity
+// Amber itself would assign.
+vector<UInt> residue::getBondedAtoms(UInt _atomIndex)
+{
+	return dataBase[itsType].getBondingPattern(_atomIndex);
+}
 double residue::getVDWEpsilon(UInt _atomIndex)
 {
 	int atomVDWtype = dataBase[itsType].itsAtomEnergyTypeDefinitions[_atomIndex][0];
