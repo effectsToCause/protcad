@@ -30,7 +30,7 @@ TARGETS = protDielectric protEvolver protDihedrals protOligamer protEnergy protM
 
 LIB_TARGETS = lib
 
-LIB_CC_OBJECTS = ran.o point.o treeNode.o atom.o atomIterator.o residue.o chain.o residueTemplate.o allowedResidue.o secondaryStructure.o chainPosition.o residueIterator.o chainModBuffer.o molecule.o protein.o ensemble.o CMath.o generalio.o pdbData.o pdbReader.o pdbWriter.o amberVDW.o aaBaseline.o amberElec.o rotamer.o rotamerLib.o PDBAtomRecord.o PDBInterface.o ruler.o line.o lineSegment.o unitSphere.o helixPropensity.o parse.o ramachandranMap.o
+LIB_CC_OBJECTS = ran.o point.o treeNode.o atom.o atomIterator.o residue.o chain.o residueTemplate.o allowedResidue.o secondaryStructure.o chainPosition.o residueIterator.o chainModBuffer.o molecule.o protein.o ensemble.o CMath.o generalio.o pdbData.o pdbReader.o pdbWriter.o amberParams.o amberVDW.o aaBaseline.o amberElec.o rotamer.o rotamerLib.o PDBAtomRecord.o PDBInterface.o ruler.o line.o lineSegment.o unitSphere.o helixPropensity.o parse.o ramachandranMap.o
 
 LIB_F77_OBJECTS = bestfit.o
 
@@ -79,7 +79,7 @@ vpath %.h $(SRCDIR)/ensemble:$(SRCDIR)/database:\
 
 vpath %.cc $(SRCDIR)/ensemble:$(SRCDIR)/database:\
 	$(SRCDIR)/ensemble:$(SRCDIR)/io:\
-	$(SRCDIR)/math:$(PROJDIR):
+	$(SRCDIR)/math:$(PROJDIR):$(PROTCADDIR)/tests
 
 vpath %.f $(SRCDIR)/math
 
@@ -138,6 +138,13 @@ protInverter : libprotcad.a protInverter.cc
 protMin : libprotcad.a protMin.cc
 	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
 	cd $(OBJDIR) && strip $@ && mv $@ $(BINDIR)
+
+# Validation harness for the Amber parameter reader.  Deliberately left out of
+# TARGETS: it is a check to be run by hand after touching amberParams or after
+# dropping in a new parm/frcmod file, not something to install.
+amberParamsTest : libprotcad.a amberParamsTest.cc
+	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
+	cd $(OBJDIR) && mv $@ $(BINDIR)
 
 protMinRep : libprotcad.a protMinRep.cc
 	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
