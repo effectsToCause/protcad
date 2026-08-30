@@ -1613,8 +1613,62 @@ static bool ensureBatch(energyContext* ctx, int nCand)
 
 // Shared tail of every batched evaluation: candidate coordinates are already in
 // d_bx/d_by/d_bz and the spatial order is already built.
+// Phase timing for evalBatch, enabled with PROTCAD_ENERGY_PROFILE=1.
+//
+// The host reduction here is O(nCand * nPad * 5) and single threaded, and it
+// has been guessed at more than once without being measured. Moving the
+// reduction onto the device is only worth doing if it is actually a meaningful
+// share of the batch cost, so measure before optimising.
+struct batchProfile
+{
+    double kernels, copy, reduce; long calls; long cands;
+    batchProfile() : kernels(0), copy(0), reduce(0), calls(0), cands(0) {}
+};
+static batchProfile g_bprof;
+static int g_bprofOn = -1;
+
+static double profWall()
+{
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + 1e-9 * ts.tv_nsec;
+}
+
+static void profReport()
+{
+    if (!g_bprof.calls) return;
+    double tot = g_bprof.kernels + g_bprof.copy + g_bprof.reduce;
+    if (tot <= 0) return;
+    fprintf(stderr,
+            "\n[energy] evalBatch profile: %ld calls, %ld candidates\n"
+            "  kernels    %8.3f s  %5.1f%%   %8.1f us/cand\n"
+            "  D2H copy   %8.3f s  %5.1f%%   %8.1f us/cand\n"
+            "  host Kahan %8.3f s  %5.1f%%   %8.1f us/cand\n"
+            "  total      %8.3f s          %8.1f us/cand\n",
+            g_bprof.calls, g_bprof.cands,
+            g_bprof.kernels, 100.0 * g_bprof.kernels / tot,
+            1e6 * g_bprof.kernels / std::max(1L, g_bprof.cands),
+            g_bprof.copy, 100.0 * g_bprof.copy / tot,
+            1e6 * g_bprof.copy / std::max(1L, g_bprof.cands),
+            g_bprof.reduce, 100.0 * g_bprof.reduce / tot,
+            1e6 * g_bprof.reduce / std::max(1L, g_bprof.cands),
+            tot, 1e6 * tot / std::max(1L, g_bprof.cands));
+}
+
+static bool profEnabled()
+{
+    if (g_bprofOn < 0)
+    {
+        const char* e = getenv("PROTCAD_ENERGY_PROFILE");
+        g_bprofOn = (e && atoi(e)) ? 1 : 0;
+        if (g_bprofOn) atexit(profReport);
+    }
+    return g_bprofOn == 1;
+}
+
 static int evalBatch(energyContext* ctx, int nCand, double* totals)
 {
+    const bool prof = profEnabled();
+    double tA = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
     const int nPad = ctx->nPad, nT = ctx->nTiles, N = ctx->N;
     ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
               ? ereal(4.188) : ereal(4.1887902048);
@@ -1652,10 +1706,14 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                               t0 + 3 * stride, t0 + 4 * stride);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
+    double tB = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
+
     CUDA_OK(ctx, cudaMemcpy(&ctx->h_bterms[0], ctx->d_bterms,
                             stride * 5 * sizeof(ereal), cudaMemcpyDeviceToHost));
     CUDA_OK(ctx, cudaMemcpy(ctx->h_order, ctx->d_sorig, nPad * sizeof(int),
                             cudaMemcpyDeviceToHost));
+
+    double tC = prof ? profWall() : 0.0;
 
     for (int k = 0; k < nCand; ++k) {
         double total = 0.0;
@@ -1676,6 +1734,15 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
             total += sum;
         }
         totals[k] = total;
+    }
+    if (prof)
+    {
+        double tD = profWall();
+        g_bprof.kernels += tB - tA;
+        g_bprof.copy    += tC - tB;
+        g_bprof.reduce  += tD - tC;
+        g_bprof.calls   += 1;
+        g_bprof.cands   += nCand;
     }
     return 0;
 }
