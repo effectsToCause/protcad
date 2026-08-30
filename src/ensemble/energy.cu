@@ -136,6 +136,13 @@ struct energyContext
     ereal *d_bterms;
     std::vector<ereal> h_bx, h_by, h_bz, h_bterms;
 
+    // Rotation groups for on-device candidate generation.  CSR: group g rotates
+    // members[memberStart[g] .. memberStart[g+1]) about the axis axisA->axisB.
+    int    numGroups;
+    int   *d_axisA, *d_axisB, *d_memberStart, *d_members;
+    int    angleCap;
+    ereal *d_angles;
+
     // Host staging (pinned).
     ereal *h_x, *h_y, *h_z;
     ereal *h_terms;               // 5 * nPad
@@ -992,6 +999,9 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     // Grid arrays are sized generously; the cell count is recomputed per call
     // but never exceeds this capacity because cellSize is raised if it would.
     ctx->cellCapacity = std::max(64, 4 * N);
+    ctx->numGroups = 0; ctx->angleCap = 0;
+    ctx->d_axisA = ctx->d_axisB = ctx->d_memberStart = ctx->d_members = 0;
+    ctx->d_angles = 0;
 
     ctx->batchCap = 0;
     ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
@@ -1123,7 +1133,9 @@ void energyDestroy(energyContext* ctx)
         ctx->d_cellCursor,
         ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds,
         ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
-        ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms
+        ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
+        ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members,
+        ctx->d_angles
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
@@ -1368,6 +1380,86 @@ int energyCompute(energyContext* ctx,
 // The host reduction is the same Kahan sum in original atom order used by the
 // single-candidate path, applied per candidate, so a batched energy is
 // bit-identical to the same conformation evaluated alone.
+// Build candidate conformations on the device.
+//
+// One block per candidate.  Each block copies the resident coordinates into its
+// own slice, then walks the requested rotation groups in order, applying the
+// candidate's angle delta to each.  The walk must be sequential because the
+// sidechain is a kinematic chain: the axis of chi_2 has already been moved by
+// chi_1.  A single barrier at the top of each group is sufficient, since a
+// group's axis atoms are never among its own members -- the host builds members
+// from the subtree strictly distal to axisB.
+//
+// Angles are deltas in degrees, matching residue::setChiByDelta.  The
+// degrees-to-radians constant is deliberately the truncated 0.017453293 used by
+// CMath::rotationMatrix, not M_PI/180: the point of this kernel is to reproduce
+// the host transform, and the more accurate constant would put a small
+// systematic rotation between the two.
+__global__ void kBuildRotamers(int N, int groupBegin, int nGroups,
+                               const ereal* __restrict__ x0,
+                               const ereal* __restrict__ y0,
+                               const ereal* __restrict__ z0,
+                               const int* __restrict__ axisA,
+                               const int* __restrict__ axisB,
+                               const int* __restrict__ memberStart,
+                               const int* __restrict__ members,
+                               const ereal* __restrict__ angles,
+                               ereal* ox, ereal* oy, ereal* oz)
+{
+    const int k   = blockIdx.x;
+    const int tid = threadIdx.x;
+    const size_t off = (size_t)k * N;
+
+    for (int i = tid; i < N; i += blockDim.x)
+    {
+        ox[off + i] = x0[i]; oy[off + i] = y0[i]; oz[off + i] = z0[i];
+    }
+
+    for (int g = 0; g < nGroups; ++g)
+    {
+        __syncthreads();
+
+        const int gi = groupBegin + g;
+        const int i1 = axisA[gi], i2 = axisB[gi];
+
+        const ereal a1x = ox[off + i1], a1y = oy[off + i1], a1z = oz[off + i1];
+        const ereal dx  = ox[off + i2] - a1x;
+        const ereal dy  = oy[off + i2] - a1y;
+        const ereal dz  = oz[off + i2] - a1z;
+
+        const ereal theta = (ereal)0.017453293 * angles[(size_t)k * nGroups + g];
+        const ereal st = sin(theta), ct = cos(theta);
+        const ereal nrm = sqrt(dx * dx + dy * dy + dz * dz);
+        if (nrm <= (ereal)0) continue;
+        const ereal n1 = dx / nrm, n2 = dy / nrm, n3 = dz / nrm;
+        const ereal n11 = n1 * n1, n12 = n1 * n2, n13 = n1 * n3;
+        const ereal n22 = n2 * n2, n23 = n2 * n3, n33 = n3 * n3;
+        const ereal omc = (ereal)1 - ct;
+
+        const ereal r00 = n11 + ((ereal)1 - n11) * ct;
+        const ereal r01 = n12 * omc - n3 * st;
+        const ereal r02 = n13 * omc + n2 * st;
+        const ereal r10 = n12 * omc + n3 * st;
+        const ereal r11 = n22 + ((ereal)1 - n22) * ct;
+        const ereal r12 = n23 * omc - n1 * st;
+        const ereal r20 = n13 * omc - n2 * st;
+        const ereal r21 = n23 * omc + n1 * st;
+        const ereal r22 = n33 + ((ereal)1 - n33) * ct;
+
+        const int s = memberStart[gi], e = memberStart[gi + 1];
+        for (int m = s + tid; m < e; m += blockDim.x)
+        {
+            const int a = members[m];
+            const ereal px = ox[off + a] - a1x;
+            const ereal py = oy[off + a] - a1y;
+            const ereal pz = oz[off + a] - a1z;
+            ox[off + a] = r00 * px + r01 * py + r02 * pz + a1x;
+            oy[off + a] = r10 * px + r11 * py + r12 * pz + a1y;
+            oz[off + a] = r20 * px + r21 * py + r22 * pz + a1z;
+        }
+    }
+}
+
 static bool ensureBatch(energyContext* ctx, int nCand)
 {
     if (nCand <= ctx->batchCap) return true;
@@ -1399,24 +1491,11 @@ static bool ensureBatch(energyContext* ctx, int nCand)
     return true;
 }
 
-int energyComputeBatch(energyContext* ctx, int nCand,
-                       const double* x, const double* y, const double* z,
-                       double* totals)
+// Shared tail of every batched evaluation: candidate coordinates are already in
+// d_bx/d_by/d_bz and the spatial order is already built.
+static int evalBatch(energyContext* ctx, int nCand, double* totals)
 {
-    if (!ctx || nCand <= 0 || !x || !y || !z || !totals) return -1;
-    const int N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
-
-    if (buildOrder(ctx) != 0) return -1;
-    if (!ensureBatch(ctx, nCand)) { ctx->lastError = "batch allocation failed"; return -1; }
-
-    const size_t KN = (size_t)nCand * N;
-    for (size_t i = 0; i < KN; ++i) {
-        ctx->h_bx[i] = ereal(x[i]); ctx->h_by[i] = ereal(y[i]); ctx->h_bz[i] = ereal(z[i]);
-    }
-    CUDA_OK(ctx, cudaMemcpy(ctx->d_bx, &ctx->h_bx[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
-    CUDA_OK(ctx, cudaMemcpy(ctx->d_by, &ctx->h_by[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
-    CUDA_OK(ctx, cudaMemcpy(ctx->d_bz, &ctx->h_bz[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
-
+    const int nPad = ctx->nPad, nT = ctx->nTiles, N = ctx->N;
     ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
               ? ereal(4.188) : ereal(4.1887902048);
 
@@ -1479,6 +1558,116 @@ int energyComputeBatch(energyContext* ctx, int nCand,
         totals[k] = total;
     }
     return 0;
+}
+
+int energyComputeBatch(energyContext* ctx, int nCand,
+                       const double* x, const double* y, const double* z,
+                       double* totals)
+{
+    if (!ctx || nCand <= 0 || !x || !y || !z || !totals) return -1;
+    const int N = ctx->N;
+
+    if (buildOrder(ctx) != 0) return -1;
+    if (!ensureBatch(ctx, nCand)) { ctx->lastError = "batch allocation failed"; return -1; }
+
+    const size_t KN = (size_t)nCand * N;
+    for (size_t i = 0; i < KN; ++i) {
+        ctx->h_bx[i] = ereal(x[i]); ctx->h_by[i] = ereal(y[i]); ctx->h_bz[i] = ereal(z[i]);
+    }
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_bx, &ctx->h_bx[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_by, &ctx->h_by[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_bz, &ctx->h_bz[0], KN * sizeof(ereal), cudaMemcpyHostToDevice));
+
+    return evalBatch(ctx, nCand, totals);
+}
+
+int energyGetBatchCoords(energyContext* ctx, int k, double* x, double* y, double* z)
+{
+    if (!ctx || k < 0 || k >= ctx->batchCap || !x || !y || !z) return -1;
+    const int N = ctx->N;
+    std::vector<ereal> t(N);
+    const size_t off = (size_t)k * N;
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_bx + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) x[i] = double(t[i]);
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_by + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) y[i] = double(t[i]);
+    CUDA_OK(ctx, cudaMemcpy(&t[0], ctx->d_bz + off, N * sizeof(ereal), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) z[i] = double(t[i]);
+    return 0;
+}
+
+int energySetRotationGroups(energyContext* ctx, int numGroups,
+                            const int* axisA, const int* axisB,
+                            const int* memberStart, const int* members)
+{
+    if (!ctx || numGroups < 0) return -1;
+    void* old[] = { ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members };
+    for (size_t i = 0; i < 4; ++i) if (old[i]) cudaFree(old[i]);
+    ctx->d_axisA = ctx->d_axisB = ctx->d_memberStart = ctx->d_members = 0;
+    ctx->numGroups = 0;
+    if (numGroups == 0) return 0;
+    if (!axisA || !axisB || !memberStart || !members) return -1;
+
+    const int nMem = memberStart[numGroups];
+    for (int g = 0; g < numGroups; ++g)
+        if (axisA[g] < 0 || axisA[g] >= ctx->N || axisB[g] < 0 || axisB[g] >= ctx->N)
+            { ctx->lastError = "rotation group axis out of range"; return -1; }
+    for (int m = 0; m < nMem; ++m)
+        if (members[m] < 0 || members[m] >= ctx->N)
+            { ctx->lastError = "rotation group member out of range"; return -1; }
+
+    bool ok = devAlloc(&ctx->d_axisA, (size_t)numGroups)
+           && devAlloc(&ctx->d_axisB, (size_t)numGroups)
+           && devAlloc(&ctx->d_memberStart, (size_t)numGroups + 1)
+           && devAlloc(&ctx->d_members, (size_t)(nMem > 0 ? nMem : 1));
+    if (!ok) { ctx->lastError = "rotation group allocation failed"; return -1; }
+
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_axisA, axisA, numGroups * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_axisB, axisB, numGroups * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_memberStart, memberStart, (numGroups + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    if (nMem > 0)
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_members, members, nMem * sizeof(int), cudaMemcpyHostToDevice));
+    ctx->numGroups = numGroups;
+    return 0;
+}
+
+int energyComputeRotamerBatch(energyContext* ctx, int nCand,
+                              int groupBegin, int nGroups,
+                              const double* anglesDeg, double* totals)
+{
+    if (!ctx || nCand <= 0 || nGroups < 0 || !totals) return -1;
+    if (!ctx->coordsValid) { ctx->lastError = "no resident coordinates"; return -1; }
+    if (groupBegin < 0 || groupBegin + nGroups > ctx->numGroups)
+        { ctx->lastError = "rotation group range out of bounds"; return -1; }
+    if (nGroups > 0 && !anglesDeg) return -1;
+
+    const int N = ctx->N;
+    if (buildOrder(ctx) != 0) return -1;
+    if (!ensureBatch(ctx, nCand)) { ctx->lastError = "batch allocation failed"; return -1; }
+
+    const size_t nAng = (size_t)nCand * (nGroups > 0 ? nGroups : 1);
+    if ((int)nAng > ctx->angleCap) {
+        if (ctx->d_angles) cudaFree(ctx->d_angles);
+        ctx->d_angles = 0; ctx->angleCap = 0;
+        if (!devAlloc(&ctx->d_angles, nAng)) { ctx->lastError = "angle allocation failed"; return -1; }
+        ctx->angleCap = (int)nAng;
+    }
+    if (nGroups > 0) {
+        std::vector<ereal> h(nAng);
+        for (size_t i = 0; i < (size_t)nCand * nGroups; ++i) h[i] = ereal(anglesDeg[i]);
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_angles, &h[0],
+                                (size_t)nCand * nGroups * sizeof(ereal), cudaMemcpyHostToDevice));
+    }
+
+    kBuildRotamers<<<nCand, 256>>>(N, groupBegin, nGroups,
+                                   ctx->d_x, ctx->d_y, ctx->d_z,
+                                   ctx->d_axisA, ctx->d_axisB,
+                                   ctx->d_memberStart, ctx->d_members,
+                                   ctx->d_angles,
+                                   ctx->d_bx, ctx->d_by, ctx->d_bz);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    return evalBatch(ctx, nCand, totals);
 }
 
 // ---------------------------------------------------------------------------

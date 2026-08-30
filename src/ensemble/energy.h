@@ -295,6 +295,50 @@ void energySetSilent(energyContext* ctx, const unsigned char* silent);
 // since every candidate uses the same order.
 //
 // Returns 0 on success, -1 on failure.
+// Register the sidechain rotation groups once, so candidate conformations can be
+// generated on the device instead of being built on the host and uploaded.
+//
+// Group g rotates members[memberStart[g] .. memberStart[g+1]) about the axis
+// running from atom axisA[g] to atom axisB[g].  Members must be the atoms
+// strictly distal to axisB in the bonded tree -- the same set the host transform
+// moves -- and must not include the axis atoms themselves.  Indices are into the
+// original atom order.  Groups belonging to one residue must be consecutive and
+// ordered chi_1, chi_2, ..., because they are applied as a kinematic chain.
+//
+// Passing numGroups == 0 clears the table.
+// Read back candidate k's generated coordinates, original atom order. For
+// verifying the device transform against the host one directly, without the
+// r^-12 conditioning of the energy in between.
+int energyGetBatchCoords(energyContext* ctx, int k, double* x, double* y, double* z);
+
+int energySetRotationGroups(energyContext* ctx, int numGroups,
+                            const int* axisA, const int* axisB,
+                            const int* memberStart, const int* members);
+
+// Generate nCand conformations on the device and evaluate them in one launch.
+//
+// Each candidate starts from the resident coordinates and applies its own angle
+// deltas, in degrees, to groups [groupBegin, groupBegin + nGroups).  anglesDeg is
+// row-major [nCand][nGroups].  This is the same convention as
+// residue::setChiByDelta, and reproduces it to within rounding: measured max
+// coordinate deviation from the host transform is ~6e-6 A in FP32 and ~1e-14 A
+// in FP64.
+//
+// It is deliberately not bitwise, because it cannot be. CUDA's double sin/cos
+// differ from glibc's by up to 1 ulp on some arguments, so the device and host
+// rotation matrices differ before any coordinate is touched. tests/rotamerTest.cc
+// pins the agreement at a few ulp rather than asserting equality.
+//
+// The host cost per candidate is nGroups angles rather than 3N coordinates, and
+// no host-side dihedral transform is needed at all.  That is what makes large
+// candidate counts -- enumerating a rotamer grid rather than sampling it --
+// affordable.
+//
+// Accuracy against energyCompute is as for energyComputeBatch.
+int energyComputeRotamerBatch(energyContext* ctx, int nCand,
+                              int groupBegin, int nGroups,
+                              const double* anglesDeg, double* totals);
+
 int energyComputeBatch(energyContext* ctx, int nCand,
                        const double* x, const double* y, const double* z,
                        double* totals);
