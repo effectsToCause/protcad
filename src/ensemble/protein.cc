@@ -1434,12 +1434,19 @@ int protein::updateDeviceCoords()
 // Generate K random sidechain conformations for one residue, evaluate them all
 // in a single batched launch, and report the best.
 //
-// This is the point of batching. A protein leaves the GPU ~95% idle, so K
-// candidates cost far less than K times one; measured at N=1337 a batch of 64
-// runs 8.1x more candidates per second than one-at-a-time evaluation. It also
-// converts the move from first-improvement -- accept the first trial that helps
-// -- into steepest-descent over K trials, which is a strictly better move for
-// the same number of GPU launches.
+// This is the point of batching. Per-candidate cost falls steeply with K and
+// then saturates: measured at N=1404 on a P2200, a single evaluation costs
+// 8772 us while K=16 costs 855 us/candidate, K=64 costs 596 and K=256 costs
+// 535. The saturation matters as much as the speedup -- beyond K ~ 64 the GPU
+// is fully occupied and further candidates are paid for linearly, so a rotamer
+// cross-product over two long sidechains is not affordable at any batch size.
+// It also converts the move from first-improvement -- accept the first trial
+// that helps -- into steepest-descent over K trials.
+//
+// Note that steepest descent is a biased proposal: it no longer samples the
+// Boltzmann distribution, and it breaks the plateau termination rule that
+// protMinCU inherited. See protMinReplicaCU for the population formulation
+// that spends the same K evaluations without either defect.
 //
 // Candidate coordinates are still generated on the CPU, one setSidechain call
 // per candidate, which is now the dominant per-candidate cost. Moving the
@@ -1628,6 +1635,222 @@ double protein::bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt 
 	for (UInt k = 1; k < _numCandidates; k++) {if (energies[k] < energies[best]) {best = k;}}
 	_bestConf = confs[best];
 	return energies[best];
+}
+
+int protein::setDeviceReplicas(int _nRepl)
+{
+	if (syncDeviceCoords() == 0) {return -1;}
+	return energySetReplicas(itsEnergyContext, _nRepl);
+}
+
+int protein::energyReplicaBatch(int _nRepl, const int* _groupBegin, const int* _nGroups,
+                                const double* _anglesDeg, int _angleStride, double* _totals)
+{
+	if (!itsEnergyContext) {return -1;}
+	return energyComputeReplicaBatch(itsEnergyContext, _nRepl, _groupBegin, _nGroups,
+	                                 _anglesDeg, _angleStride, _totals);
+}
+
+int protein::commitReplicas(int _nRepl, const int* _accept)
+{
+	if (!itsEnergyContext) {return -1;}
+	return energyCommitReplicas(itsEnergyContext, _nRepl, _accept);
+}
+
+int protein::getReplicaCoords(int _k, double* _x, double* _y, double* _z)
+{
+	if (!itsEnergyContext) {return -1;}
+	return energyGetReplicaCoords(itsEnergyContext, _k, _x, _y, _z);
+}
+
+void protein::setCoordsFromArray(const double* _x, const double* _y, const double* _z)
+{
+	// Inverse of updateDeviceCoords(): same atomIterator traversal, so the
+	// index mapping is identical by construction rather than by assumption.
+	const int N = getNumAtoms();
+	atomIterator aIter(this); int i = 0;
+	for (; !(aIter.last()) && i < N; aIter++, i++)
+	{
+		aIter.getAtomPointer()->setCoords(_x[i], _y[i], _z[i]);
+	}
+}
+
+int protein::maxRotationGroupCount() const
+{
+	int m = 0;
+	for (UInt i = 0; i < itsRotGroupCount.size(); i++)
+	{
+		if (itsRotGroupCount[i] > m) {m = itsRotGroupCount[i];}
+	}
+	return m;
+}
+
+// Fixed-budget population Monte Carlo over sidechain torsions.
+//
+// This replaces the plateau counter used by protMinCU, which does not survive
+// contact with a batched move. That loop terminates after `plateau` consecutive
+// trials with no improvement better than KT, a criterion written for
+// first-improvement on a single candidate. Steepest descent over a batch finds
+// some improvement on nearly every trial, so the counter resets almost every
+// iteration and the required run of consecutive failures effectively never
+// occurs -- the expected iteration count grows like (1-q)^-plateau in the reset
+// probability q. A 1crn minimisation that took 13 s under the old move ran for
+// 83 minutes without terminating. A sweep budget is not a workaround for that;
+// it is the correct control for a sampler, whose cost should be chosen rather
+// than discovered.
+//
+// The population is the point. Best-of-K spends K energy evaluations to advance
+// one chain by one step, and the resulting move is a biased proposal with no
+// compensating acceptance term, so the chain no longer samples the Boltzmann
+// distribution. K replicas spend the same K evaluations to advance K chains by
+// one step each, every proposal is drawn from a symmetric kernel and tested on
+// its own, and the batch cost is identical because per-candidate cost is flat
+// out to K ~ 64 on this hardware.
+//
+// Two deliberate departures from randContinuousSidechainConformation:
+//
+//   One chi per trial. That generator perturbs every chi of a residue at once,
+//   so acceptance falls off roughly exponentially in the chi count and the long
+//   sidechains -- Lys, Arg, Met, Glu, Gln -- are penalised hardest. That is
+//   backwards: those are the ones that most need to move. Moving a single
+//   randomly chosen chi keeps the acceptance rate comparable across residue
+//   types. The lever-arm scaling of the original is kept, since measurement
+//   showed it does what it was designed to do: span 180/(distal chis) holds the
+//   RMS Cartesian displacement of the moved atoms near 2 A regardless of which
+//   chi is chosen.
+//
+//   A rotamer-hop component. An incremental walk of at most +/-90 degrees
+//   cannot cross the ~120 degree barriers between sp3 rotamer wells, because
+//   the eclipsed intermediate is high enough in energy that Metropolis rejects
+//   the path. Chi1 therefore stays in whatever well the input structure
+//   supplied, and no amount of sampling fixes it. Twenty percent of proposals
+//   are instead a discrete +/-120 degree jump, which lands directly in an
+//   adjacent well without traversing the barrier. Both components are symmetric
+//   proposals, so Metropolis remains valid with no Hastings correction.
+void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
+{
+	saveCurrentState();
+	if (!deviceMemLoadedAll) {loadDeviceMemAll();}
+	if (_sweeps == 0 || _nReplicas == 0) {return;}
+
+	const int N = syncDeviceCoords();
+	if (N == 0) {return;}
+	if (buildRotationGroups() <= 0) {return;}
+
+	const int P = (int)_nReplicas;
+	if (energySetReplicas(itsEnergyContext, P) != 0)
+	{
+		cout << "protein::protMinReplicaCU failed: " << energyLastError(itsEnergyContext) << endl;
+		return;
+	}
+
+	const int stride = maxRotationGroupCount();
+	if (stride <= 0) {return;}
+
+	// Note on throughput: per-candidate cost rises over a long run (116 us at
+	// 2000 sweeps to 187 us at 20000 on 1crn). This is not a defect. It was
+	// first suspected to be stale spatial ordering -- the tiling is rebuilt
+	// every launch but from the resident coordinates, which the sweep loop
+	// never touches -- but periodically re-seeding the order from the best
+	// conformation recovered only ~1%. The actual cause is physical: a 2000
+	// sweep run started from an already-minimized 1crn costs 164 us/candidate
+	// versus 116 us from the crystal. Minimization compacts the structure, so
+	// more pairs genuinely survive the 12 A cutoff. The extra time is real
+	// work, and it is not worth optimizing away.
+
+	const double KT = KB * Temperature();
+	const UInt chainNum = getNumChains();
+
+	double startEnergy = protEnergyCU();
+	vector <double> current(P, startEnergy), trial(P, 0.0);
+	vector <int> groupBegin(P, 0), nGroups(P, 0), accept(P, 0);
+	vector <double> angles((size_t)P * stride, 0.0);
+
+	// The best conformation seen must be captured when it is seen: the replica
+	// that found it keeps walking and will usually leave it behind.
+	double bestEnergy = startEnergy; bool haveBest = false;
+	vector <double> bestX(N), bestY(N), bestZ(N);
+
+	srand(time(NULL));
+
+	for (UInt sweep = 0; sweep < _sweeps; sweep++)
+	{
+		for (int k = 0; k < P; k++)
+		{
+			for (int g = 0; g < stride; g++) {angles[(size_t)k * stride + g] = 0.0;}
+			groupBegin[k] = 0; nGroups[k] = 0;
+
+			// Pick a residue that actually has rotatable chis. Glycine and
+			// alanine are common enough that rejection sampling needs a bound.
+			int begin = 0, count = 0;
+			for (int attempt = 0; attempt < 32; attempt++)
+			{
+				UInt randchain = rand() % chainNum;
+				UInt randres = rand() % getNumResidues(randchain);
+				if (getRotationGroupRange(randchain, randres, begin, count)) {break;}
+				count = 0;
+			}
+			if (count <= 0) {continue;}   // null move: legal, costs one slot
+
+			groupBegin[k] = begin; nGroups[k] = count;
+
+			const int j = rand() % count;
+			int distal = count - j; if (distal < 2) {distal = 2;}
+			const double span = 180.0 / distal;
+
+			double delta;
+			if ((rand() / (double)RAND_MAX) < 0.20)
+			{
+				delta = (rand() % 2) ? 120.0 : -120.0;
+			}
+			else
+			{
+				delta = 2.0 * span * (rand() / (double)RAND_MAX - 0.5);
+			}
+			angles[(size_t)k * stride + j] = delta;
+		}
+
+		if (energyReplicaBatch(P, &groupBegin[0], &nGroups[0], &angles[0], stride, &trial[0]) != 0)
+		{
+			cout << "protein::protMinReplicaCU failed: " << energyLastError(itsEnergyContext) << endl;
+			break;
+		}
+
+		for (int k = 0; k < P; k++)
+		{
+			const double deltaEnergy = trial[k] - current[k];
+			bool boltzmannAcceptance = (deltaEnergy <= 0.0) ||
+			                           ((rand() / (double)RAND_MAX) < exp(-deltaEnergy / KT));
+			accept[k] = boltzmannAcceptance ? 1 : 0;
+			if (boltzmannAcceptance)
+			{
+				current[k] = trial[k];
+				if (trial[k] < bestEnergy)
+				{
+					// Still in the batch buffer at this point, before commit.
+					if (getBatchCoords(k, &bestX[0], &bestY[0], &bestZ[0]) == 0)
+					{
+						bestEnergy = trial[k]; haveBest = true;
+					}
+				}
+			}
+		}
+
+		if (commitReplicas(P, &accept[0]) != 0)
+		{
+			cout << "protein::protMinReplicaCU commit failed: "
+			     << energyLastError(itsEnergyContext) << endl;
+			break;
+		}
+	}
+
+	if (haveBest)
+	{
+		setCoordsFromArray(&bestX[0], &bestY[0], &bestZ[0]);
+		syncDeviceCoords();
+	}
+	E = bestEnergy;
+	return;
 }
 
 double protein::protEnergyCU()

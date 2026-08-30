@@ -343,6 +343,52 @@ int energyComputeBatch(energyContext* ctx, int nCand,
                        const double* x, const double* y, const double* z,
                        double* totals);
 
+// ---------------------------------------------------------------------------
+// Population Monte Carlo over replica states
+// ---------------------------------------------------------------------------
+//
+// A replica is an independent Metropolis walker holding its own accepted
+// conformation on the device.  The distinction from energyComputeBatch matters
+// for search efficiency rather than for speed: best-of-K spends K evaluations
+// to advance one chain by a single step, while K replicas spend the same K
+// evaluations to advance K chains by one step each.  The GPU cost is identical.
+//
+// Best-of-K followed by a Metropolis test is also not a valid sampler -- the
+// proposal is biased toward low energy and the acceptance carries no
+// compensating term, so the chain does not converge to the Boltzmann
+// distribution of the energy function.  Replicas restore that, because each
+// proposal is drawn from a symmetric kernel and tested on its own.
+//
+// Usage per sweep:
+//   energySetReplicas      once, seeding every replica from resident coords
+//   energyComputeReplicaBatch   propose and evaluate all replicas
+//   energyCommitReplicas   write back only the accepted proposals
+//
+// energySetReplicas seeds all nRepl replicas from the resident coordinates.
+// Replicas share the spatial order built from those coordinates; see the note
+// in energy.cu on divergence drag.
+int energySetReplicas(energyContext* ctx, int nRepl);
+
+// Propose one move per replica and evaluate all of them in a single launch.
+// Replica k rotates chi groups [groupBegin[k], groupBegin[k] + nGroups[k]) of
+// its own state by anglesDeg[k * angleStride + g].  angleStride must be at
+// least max(nGroups[k]); the ragged tail is ignored, so a mixed set of residue
+// types needs no prefix sum.  Totals are returned in energy units, one per
+// replica, and the proposed coordinates remain in the batch buffer for
+// energyCommitReplicas.
+int energyComputeReplicaBatch(energyContext* ctx, int nRepl,
+                              const int* groupBegin, const int* nGroups,
+                              const double* anglesDeg, int angleStride,
+                              double* totals);
+
+// Commit the proposals for replicas with accept[k] != 0.  Rejected replicas
+// retain their previous state at no additional cost.  Must follow a
+// energyComputeReplicaBatch call with the same nRepl.
+int energyCommitReplicas(energyContext* ctx, int nRepl, const int* accept);
+
+// Read back replica k's accepted coordinates in original atom order.
+int energyGetReplicaCoords(energyContext* ctx, int k, double* x, double* y, double* z);
+
 int energyCompute(energyContext* ctx,
                   const double* x, const double* y, const double* z,
                   double* totalOut, energyBreakdown* breakdown);

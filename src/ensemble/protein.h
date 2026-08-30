@@ -250,6 +250,24 @@ public:
 	double bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt _numCandidates,
 	                                vector < vector <double> > &_bestConf);
 	bool protEnergyBreakdownCU(energyBreakdown& _out);
+	// --- Population Monte Carlo -------------------------------------------
+	// Seed nRepl independent Metropolis walkers from the current conformation.
+	int setDeviceReplicas(int _nRepl);
+	// Propose one move per replica, applied to that replica's own state, and
+	// evaluate the whole population in a single launch. Angles are deltas in
+	// degrees, row-major [nRepl][angleStride].
+	int energyReplicaBatch(int _nRepl, const int* _groupBegin, const int* _nGroups,
+	                       const double* _anglesDeg, int _angleStride, double* _totals);
+	// Keep the proposals of replicas with accept[k] != 0; the rest are unchanged.
+	int commitReplicas(int _nRepl, const int* _accept);
+	int getReplicaCoords(int _k, double* _x, double* _y, double* _z);
+	// Overwrite every atom position from a flat array in atomIterator order.
+	void setCoordsFromArray(const double* _x, const double* _y, const double* _z);
+	// Largest chi count over all residues, i.e. the angle stride a replica
+	// sweep needs so a mixed set of residue types fits one rectangular array.
+	int maxRotationGroupCount() const;
+	// Fixed-budget population Monte Carlo over sidechain torsions.
+	void protMinReplicaCU(UInt _sweeps, UInt _nReplicas);
 	// Number of disulfide cross-links removed from the nonbonded sum.
 	int getDisulfideCount() const {return itsDisulfideCount;}
 	void protRelaxCU(UInt _plateau, bool _backbone);
