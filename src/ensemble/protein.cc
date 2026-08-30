@@ -963,74 +963,6 @@ double protein::getVolume(UInt _method)
 
 // get the interaction energy of a particular modified position with the rest of the system, taking into account positions
 // symmetry linked to the passed position
-double protein::getPositionEnergy(UIntVec _pos)
-{
-	vector <int> pos;
-	pos.resize(0);
-	for (UInt i = 0; i < _pos.size(); i ++)
-	{
-		pos.push_back((int)_pos[i]);
-	}
-	return getPositionEnergy(pos);
-}
-
-double protein::getPositionEnergy(vector <int> _position)
-{
-   // bool calcSurfEnergy = false;
-   // if (solvation::getItsScaleFactor() != 0.0) calcSurfEnergy = true;
-   // if (calcSurfEnergy) getSurfaceArea();
-	if (_position.size() == 2) // ensemble number not in
-	{
-
-		vector <int> temp;
-		temp.resize(0);
-		temp.push_back(0);
-		temp.push_back(_position[0]);
-		temp.push_back(_position[1]);
-		_position = temp;
-	}
-
-    double intraEnergy = 0.0;
-    if (_position[1] >=0 && _position[1] < (int)itsChains.size())
-    {
-
-        double tempE = itsChains[_position[1]]->getPositionIntraEnergy(_position);
-        //if (calcSelfEnergy)
-        //{
-        //    double selfEnergy = getSelfEnergy(_position[1], _position[2]);
-        //    tempE -= selfEnergy;
-        //}
-        //if (calcSurfEnergy) tempE += getSolvationEnergyNoSASA(_position[1], _position[2]);
-        if (messagesActive) cout << " intraEnergy of chain " << _position[1] << ": " << tempE << endl;
-        intraEnergy += tempE;
-        for (UInt i = 0; i < itsChains.size(); i++)
-        {
-            if ((int)i != _position[1])
-            {
-                tempE = itsChains[_position[1]]->getPositionInterEnergy(_position, itsChains[i]);
-                if (messagesActive) cout << " interEnergy of chains " << _position[1] << " and " << i << ": " << tempE << endl;
-                intraEnergy += tempE;
-            }
-        }
-    }
-
-/*	for (UInt i = 0; i < itsChains.size(); i ++)
-	{
-		for (UInt j = 0; j < getNumResidues(i); j ++)
-		{
-			if (i == _position[1] && j == _position[2])
-			{ // skip
-			}
-			else
-			{
-				intraEnergy += getHBondEnergy(_position[1], _position[2], i, j);
-			}
-		}
-	}
-*/
-    return intraEnergy;
-}
-
 int protein::setPhi(const UInt _chain, const UInt _res, double _phi)
 {
 	if (_chain < itsChains.size())
@@ -1068,116 +1000,6 @@ int protein::setDihedral(const UInt _chainIndex, const UInt _resIndex, double _d
 		cout << "chain index out of range" << endl;
 		return -1;
 	}
-}
-
-double protein::getPositionEnergy(UInt _chain, UInt _residue)
-{
-	vector <int> position;
-	position.resize(0);
-	position.push_back(-1);
-	position.push_back((int)_chain);
-	position.push_back((int)_residue);
-	double energy=getPositionEnergy(position);
-
-	return energy;
-}
-
-double protein::getIntraEnergy(const UInt _chain1, const UInt _residue1, const UInt _atom1, const UInt _chain2, const UInt _residue2, const UInt _atom2)
-{
-	if (_chain1 >=0 && _chain1 < itsChains.size() && _chain2 >= 0 && _chain2 < itsChains.size())
-	{
-		return itsChains[_chain1]->getInterEnergy(_residue1, _atom1, itsChains[_chain2], _residue2, _atom2);
-	}
-	else
-	{
-		cout << "ERROR in getIntraEnergy(chain1,res1,atom1,chain2,res2,atom2) ..." << endl;
-		cout << "chain index of 1 or 2 out of range." << endl;
-	}
-	exit(1);
-}
-
-double protein::intraEnergy()
-{	double intraEnergy = 0.0;
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-#ifdef _PROTEIN_DEBUG
-		if (messagesActive) cout << "intraEnergy being calculated! ";
-#endif
-		intraEnergy += itsChains[i]->intraEnergy();
-		if (messagesActive) cout << "\n" << "intraEnergy - chain " << i << " is: " << itsChains[i]->intraEnergy() << endl;
-		for(UInt j=i+1; j<itsChains.size(); j++)
-		{
-			intraEnergy += itsChains[i]->interEnergy(itsChains[j]);
-			if (messagesActive) cout << "\n" << "interEnergy - chain " << i << "," << j << " is: " << itsChains[i]->interEnergy(itsChains[j]) << endl;
-		}
-	}
-    //if (solvation::getItsScaleFactor() != 0.0)
-    //{
-     //   intraEnergy += tabulateSolvationEnergy();
-    //}
-	return intraEnergy;
-}
-double protein::getSoluteEnergy(UInt chainIndex, UInt resIndex, UInt atomIndex, UInt otherChainIndex, UInt otherResIndex, UInt otherAtomIndex)
-{
-	setMoved(true,0);
-	updateDielectrics();
-	double E = itsChains[chainIndex]->getSoluteEnergy(resIndex, atomIndex, itsChains[otherChainIndex], otherResIndex, otherAtomIndex);
-	return E;
-}
-
-double protein::getBackboneHBondEnergy(UInt donorChainIndex, UInt donorResIndex, UInt acceptorChainIndex, UInt acceptorResIndex)
-{	//gordon and mayot 1999
-	if( isCofactor(donorChainIndex,donorResIndex) || isCofactor(acceptorChainIndex,acceptorResIndex) ){return 0.0;}
-
-    vector <dblVec> donorList(0);
-    vector <dblVec> donorBaseList(0);
-    vector <dblVec> acceptorList(0);
-    vector <dblVec> acceptorBaseList(0);
-    vector <double> donorAngleList(0);
-    vector <double> acceptorAngleList(0);
-	
-	dblVec donor = getCoords(donorChainIndex,donorResIndex,"H");
-	dblVec donorBase = getCoords(donorChainIndex,donorResIndex,"N");
-	dblVec acceptor = getCoords(acceptorChainIndex,acceptorResIndex,"O");
-	dblVec acceptorBase = getCoords(acceptorChainIndex,acceptorResIndex,"C");
-	donorList.push_back(donor);
-	donorBaseList.push_back(donorBase);
-	acceptorList.push_back(acceptor);
-	acceptorBaseList.push_back(acceptorBase);
-	donorAngleList.push_back(180.0);
-	acceptorAngleList.push_back(180.0);
-        
-    double energy = 0.0;
-    for (UInt i = 0; i < donorList.size(); i ++)
-    {
-        for (UInt j = 0; j < acceptorList.size(); j ++)
-        {
-            dblVec DDB = donorList[i] - donorBaseList[i];
-            dblVec DA = donorList[i] - acceptorList[j];
-            dblVec AAB = acceptorList[j] - acceptorBaseList[j];
-
-            double magDDB = sqrt(CMath::dotProduct(DDB,DDB));
-            double magDA = sqrt(CMath::dotProduct(DA,DA));
-            double magAAB = sqrt(CMath::dotProduct(AAB,AAB));
-
-			double thisE;
-			if (magDA < 1e-50) thisE = 0.0;            
-			else 
-			{
-				double donorAngle = acos( CMath::dotProduct(DA,DDB)/(magDDB*magDA) );
-            	double acceptorAngle = acos( CMath::dotProduct(DA,AAB)/(magDA*magAAB) );
-
-            	double distRatio = 1.8 / magDA;
-            	thisE = 10.0 *(5.0*pow(distRatio,12.0)-6.0*pow(distRatio,10.0));
-				//cout << thisE << endl;
-            	double angleFactor1 = cos(donorAngleList[i]*PI/180.0-donorAngle);
-            	double angleFactor2 = cos(acceptorAngleList[j]*PI/180.0-acceptorAngle);
-            	thisE = thisE * pow(angleFactor1, 2.0) * pow (angleFactor2, 2.0);
-			}
-            energy += thisE;
-        }
-    }
-    return energy;
 }
 
 //**************CUDA related functions***************************************
@@ -2282,6 +2104,157 @@ void protein::updateDielectricsCU()
 	}
 }
 
+// The CPU minimisers and relaxers are gone; these names now route to the
+// kernel-backed implementations so callers keep working.
+void protein::protMin(bool _backbone) {protMinCU(_backbone);}
+
+void protein::protMin(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains)
+{
+	protMinCU(_backbone, _frozenResidues, _activeChains);
+}
+
+void protein::protRelax(UInt _plateau, bool _backbone) {protRelaxCU(_plateau, _backbone);}
+
+void protein::protRelax(UIntVec _frozenResidues, UIntVec _activeChains)
+{
+	protRelaxCU(_frozenResidues, _activeChains);
+}
+
+// Backbone-only clash count.  The CPU pass defined the backbone as a residue's
+// first four atoms (N, CA, C, O) plus CB where present; that definition is
+// preserved here by silencing every other atom and reusing the same clash
+// kernel the whole-protein count goes through, so the two agree on what a
+// clash is.  The old pair loop used the pre-ff14SB radii and did not.
+UInt protein::getNumHardBackboneClashesCU()
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return 0;}
+	vector<unsigned char> base(N, 0), mask(N, 1);
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		residue* pRes = aIter.getResiduePointer();
+		UInt a = aIter.getAtomIndex();
+		unsigned char s = pRes->getAtom(a)->getSilentStatus() ? 1 : 0;
+		base[i] = s;
+		bool backbone = (a < 4) || (a == 4 && pRes->getAtom(4)->getName() == "CB");
+		mask[i] = backbone ? s : 1;
+	}
+	energySetSilent(itsEnergyContext, &mask[0]);
+	int c = 0;
+	int rc = clashCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0], &c);
+	energySetSilent(itsEnergyContext, &base[0]);
+	if (rc)
+	{
+		cout << "protein::getNumHardBackboneClashesCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return 0;
+	}
+	return c < 0 ? 0 : (UInt)c;
+}
+
+UInt protein::getNumHardBackboneClashes()
+{
+	return getNumHardBackboneClashesCU();
+}
+
+// Median residue clash count, now read off the per-residue GPU pass.
+UInt protein::getMedianResidueNumHardClashes()
+{
+	updateResidueClashesCU();
+	vector<UInt> counts;
+	for (UInt i = 0; i < itsChains.size(); i++)
+	{
+		for (UInt j = 0; j < getNumResidues(i); j++)
+		{
+			counts.push_back(itsChains[i]->getClashes(j));
+		}
+	}
+	if (counts.empty()) {return 0;}
+	sort(counts.begin(), counts.end());
+	return counts[counts.size()/2];
+}
+
+// Sum of the isolated-chain energies, i.e. the total with every interchain
+// contribution removed.
+double protein::intraEnergy()
+{
+	double e = 0.0;
+	for (UInt i = 0; i < itsChains.size(); i++) {e += protEnergyCU(i);}
+	return e;
+}
+
+// Per-residue energies and clashes, derived from the kernel's per-atom exports
+// rather than from a second implementation of the model.  energyComputeAtoms
+// splits every pair interaction evenly between its two atoms, so summing a
+// residue's atoms gives that residue's share of the total and the residue
+// values sum back to the protein energy.
+void protein::updateResidueEnergiesCU()
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return;}
+	vector<double> perAtom(N, 0.0);
+	double total = 0.0;
+	if (energyComputeAtoms(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0],
+	                       &total, 0, &perAtom[0]))
+	{
+		cout << "protein::updateResidueEnergiesCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return;
+	}
+	E = total;
+	residue* current = 0;
+	double sum = 0.0;
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		residue* pRes = aIter.getResiduePointer();
+		if (pRes != current)
+		{
+			if (current) {current->setEnergy(sum);}
+			current = pRes;
+			sum = 0.0;
+		}
+		sum += perAtom[i];
+	}
+	if (current) {current->setEnergy(sum);}
+	setMoved(false,0);
+}
+
+// perAtomOut records each clashing pair once for each of its two atoms, so a
+// residue's count is the number of clashing contacts its atoms take part in.
+void protein::updateResidueClashesCU()
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return;}
+	vector<int> perAtom(N, 0);
+	int total = 0;
+	if (clashComputeAtoms(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0],
+	                      &total, &perAtom[0]))
+	{
+		cout << "protein::updateResidueClashesCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return;
+	}
+	clash = total;
+	residue* current = 0;
+	UInt sum = 0;
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		residue* pRes = aIter.getResiduePointer();
+		if (pRes != current)
+		{
+			if (current) {current->setClashes(sum);}
+			current = pRes;
+			sum = 0;
+		}
+		sum += (UInt)perAtom[i];
+	}
+	if (current) {current->setClashes(sum);}
+	setMoved(false,1);
+}
+
 // Per-term decomposition, which the original could not provide: it reduced
 // everything into a single accumulator inside the kernel.
 bool protein::protEnergyBreakdownCU(energyBreakdown& _out)
@@ -2668,29 +2641,6 @@ double protein::protEnergy(UInt chainIndex) //Energy of chain alone
 	return protEnergyCU(chainIndex);
 }
 
-void protein::updateEnergy()
-{
-	updateMovedDependence(0);
-	updateDielectrics();
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		itsChains[i]->updateEnergy();
-		for(UInt j=i+1; j<itsChains.size(); j++)
-		{
-			itsChains[i]->updateEnergy(itsChains[j]);
-		}
-	}
-	setMoved(false,0);
-}
-
-void protein::updateEnergy(UInt chainIndex)
-{
-	updateMovedDependence(0);
-	updateDielectrics(chainIndex);
-	itsChains[chainIndex]->updateEnergy();
-	setMoved(false,0);
-}
-
 void protein::updateDielectrics()
 {
 	updateDielectricsCU();
@@ -2724,63 +2674,9 @@ void protein::setMoved(bool _moved, UInt _EorC)
 double protein::protEnergy(UInt chainIndex, UInt resIndex)
 {
 	if (getMoved(chainIndex, resIndex, 0)){
-		updateEnergy();
+		updateResidueEnergiesCU();
 	}
 	return itsChains[chainIndex]->getEnergy(resIndex);
-}
-
-double protein::getMedianResidueEnergy()
-{
-	updateEnergy();
-	double median, resE;
-	vector <double> resEnergies;
-	for (UInt i = 0; i < itsChains.size(); i++)
-	{
-		for (UInt j = 0; j < itsChains[i]->itsResidues.size(); j++)
-		{
-			resE = itsChains[i]->getEnergy(j);
-			resEnergies.push_back(resE);
-		}
-	}
-	
-	size_t size = resEnergies.size();
-	sort(resEnergies.begin(), resEnergies.end());
-	if (size % 2 == 0)
-	{
-		median = (resEnergies[size / 2 - 1] + resEnergies[size / 2]) / 2;
-	}
-	else
-	{
-		median = resEnergies[size / 2];
-	}
-	return median;
-}
-
-double protein::getMedianResidueEnergy(UIntVec _activeChains)
-{
-	updateEnergy();
-	double median, resE;
-	vector <double> resEnergies;
-	for (UInt i = 0; i < _activeChains.size(); i++)
-	{
-		for (UInt j = 0; j < itsChains[_activeChains[i]]->itsResidues.size(); j++)
-		{
-			resE = itsChains[_activeChains[i]]->getEnergy(j);
-			resEnergies.push_back(resE);
-		}
-	}
-	
-	size_t size = resEnergies.size();
-	sort(resEnergies.begin(), resEnergies.end());
-	if (size % 2 == 0)
-	{
-		median = (resEnergies[size / 2 - 1] + resEnergies[size / 2]) / 2;
-	}
-	else
-	{
-		median = resEnergies[size / 2];
-	}
-	return median;
 }
 
 bool protein::boltzmannEnergyCriteria(double _deltaEnergy) //calculate boltzmann probability of an energy to determine acceptance criteria
@@ -2798,48 +2694,6 @@ double protein::boltzmannProbabilityToEnergy(double Pi, double Pj) //calculate b
 	return Energy;
 }
 
-void protein::updateBackboneClashes()
-{
-	updateMovedDependence(2);
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		itsChains[i]->updateBackboneClashes();
-		for(UInt j=i+1; j<itsChains.size(); j++)
-		{
-			itsChains[i]->updateBackboneClashes(itsChains[j]);
-		}
-	}
-	setMoved(false, 2);
-}
-
-UInt protein::getNumHardBackboneClashes()
-{
-	updateBackboneClashes();
-	// As in getNumHardClashes(): each pair is recorded once per partner, so the
-	// participation sum is halved once, globally, rather than per pair.  There
-	// is no intra-residue backbone term.
-	UInt participation = 0;
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		participation += itsChains[i]->getBackboneClashes();
-	}
-	return participation / 2;
-}
-
-void protein::updateClashes()
-{
-	updateMovedDependence(1);
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		itsChains[i]->updateClashes();
-		for(UInt j=i+1; j<itsChains.size(); j++)
-		{
-			itsChains[i]->updateClashes(itsChains[j]);
-		}
-	}
-	setMoved(false, 1);
-}
-
 // As protEnergy: the clash count now comes from the kernel, which shares the
 // AMBER radius array with the vdW term.  The CPU counter used the older
 // radii, so the two disagreed on which contacts were clashes.
@@ -2852,64 +2706,9 @@ UInt protein::getNumHardClashes()
 UInt protein::getNumHardClashes(UInt chainIndex, UInt resIndex)
 {
 	if (getMoved(chainIndex, resIndex,1)){
-		updateClashes();
+		updateResidueClashesCU();
 	}
 	return itsChains[chainIndex]->getClashes(resIndex);
-}
-
-UInt protein::getMedianResidueNumHardClashes()
-{
-	updateClashes();
-	UInt median, clashes;
-	vector <UInt> resClashes;
-	for (UInt i = 0; i < itsChains.size(); i++)
-	{
-		for (UInt j = 0; j < itsChains[i]->itsResidues.size(); j++)
-		{
-			clashes = itsChains[i]->getClashes(j);
-			resClashes.push_back(clashes);
-		}
-	}
-	
-	size_t size = resClashes.size();
-	sort(resClashes.begin(), resClashes.end());
-	if (size % 2 == 0)
-	{
-		median = (resClashes[size / 2 - 1] + resClashes[size / 2]) / 2;
-	}
-	else
-	{
-		median = resClashes[size / 2];
-	}
-	return median;
-}
-
-double protein::getMedianResidueEnergy(UIntVec _activeChains, UIntVec _activeResidues)
-{
-	updateEnergy();
-	double median, resE;
-	vector <double> resEnergies;
-	for (UInt i = 0; i < _activeChains.size(); i++)
-	{
-		for (UInt j = 0; j < _activeResidues.size(); j++)
-		{
-			resE = itsChains[_activeChains[i]]->getEnergy(_activeResidues[j]);
-			resEnergies.push_back(resE);
-		}
-	}
-	size_t size = resEnergies.size();
-
-	sort(resEnergies.begin(), resEnergies.end());
-
-	if (size  % 2 == 0)
-	{
-	  median = (resEnergies[size / 2 - 1] + resEnergies[size / 2]) / 2;
-	}
-	else
-	{
-	  median = resEnergies[size / 2];
-	}
-	return median;
 }
 
 void protein::updateResiduesPerTurnType()
@@ -2928,32 +2727,6 @@ void protein::updateTotalNumResidues()
 		numResidues += getNumResidues(i);
 	}
 	itsNumResidues = numResidues;
-}
-
-double protein::intraEnergy(UInt _chain1, UInt _chain2)
-{
-    if (_chain1 >=0 && _chain2 >=0 && _chain1 < itsChains.size() && _chain2 < itsChains.size() )
-    {
-        return itsChains[_chain1]->interEnergy(itsChains[_chain2]);
-    }
-    else
-    {
-        cout << "ERROR in intraEnergy(chain, chain) chain index out of range." << endl;
-        exit(1);
-    }
-}
-
-double protein::intraEnergy(const UInt _chain)
-{
-	if((_chain>=0) && (_chain<itsChains.size()))
-	{
-		return itsChains[_chain]->intraEnergy();
-	}
-	else
-	{
-		cout << "ERROR in protein::intraEnergy(_chain), exiting\n";
-		exit(1);
-	}
 }
 
 UInt protein::getNumResidues(UInt _chainIndex) const
@@ -3970,37 +3743,6 @@ void protein::rotate(const UInt _index, const point& _point,const dblVec& _R_axi
 }
 
 
-double protein::getSelfEnergy(UInt _chainIndex, UInt _resIndex)
-{
-	if (calcSelfEnergy == false && messagesActive) cout << "WARNING:  protein::getSelfEnergy(...) invoked even though calcSelfENergy set to false ... " << endl;
-	if (_chainIndex >= 0 && _chainIndex < itsChains.size())
-	{
-		double selfEnergy;
-		selfEnergy = itsChains[_chainIndex]->getSelfEnergy(_resIndex);
-		// and add self energy of symmetry linked chains
-		UInt independentChainIndex = 0;
-		for (UInt i = 0; i < itsIndependentChainsMap.size(); i++)
-		{
-			if (itsIndependentChainsMap[i] == _chainIndex) independentChainIndex = i;
-		}
-		UInt numSymmetryLinkedChains = itsChainLinkageMap[independentChainIndex].size();
-		if (itsChainLinkageMap[independentChainIndex][0] != -1)
-		{
-			for (UInt i = 0; i < numSymmetryLinkedChains; i ++)
-			{
-				selfEnergy += itsChains[itsChainLinkageMap[independentChainIndex][i]]->getSelfEnergy(_resIndex);
-			}
-		}
-		return selfEnergy;
-	}
-	else
-	{
-		cout << "Invalid Chain Specifier: " << _chainIndex << endl;
-		exit(1);
-	}
-	return -1;
-}
-
 void protein::coilcoil(const double _pitch)
 {
     if (_pitch == 0.0)
@@ -4194,19 +3936,6 @@ residue* protein::superimposeGLY(const UInt _chain, const UInt _residue)
 	}
 }
 
-double protein::calculateHCA_O_hBondEnergy()
-{
-	double hbondEnergy = 0.0;
-	for (UInt i = 0; i < itsChains.size(); i ++)
-	{
-		for (UInt j = 0; j < itsChains.size(); j ++)
-		{
-			if (i!=j)hbondEnergy += itsChains[i]->calculateHCA_O_hBondEnergy(itsChains[j]);
-		}
-	}
-	return hbondEnergy;
-}
-
 dblVec protein::getBackBoneCentroid()
 {
 	dblVec centroid(3);
@@ -4221,23 +3950,6 @@ dblVec protein::getBackBoneCentroid()
 }
 
 typedef UIntVec::iterator iterUIntVec;
-
-double protein::getResPairEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2)
-{
-	//if (messagesActive) cout << "pair energy " << _chain1 << " " << _res1 << " " << _chain2 << " " << _res2 << ":  " ;
-	if (_chain1 >= 0 && _chain1 < itsChains.size() && _chain2 >= 0 && _chain2 < itsChains.size())
-	{
-		double energy = itsChains[_chain1]->getInterEnergy(_res1, itsChains[_chain2], _res2);
-		//cout << _chain1 << " " << _res1 << " " << _chain2 << " " << _res2 << " " <<energy << endl;
-		return energy;
-	}
-	else
-	{
-		cout << _chain1 << " " << _res1 << " " << _chain2 << " " << _res2 << endl;
-		cout << "ERROR:  chain indices out of range in getResPairEnergy" << endl;
-		exit(1);
-	}
-}
 
 vector <dblVec> protein::saveCoords( UInt chainIndex, UInt resIndex)
 {
@@ -4258,410 +3970,6 @@ void protein::setAllCoords( UInt chainIndex, UInt resIndex, vector<dblVec> allCo
 	{
 		setCoords(chainIndex, resIndex, i, allCoords[i]);
 	}
-}
-
-void protein::protMin(bool _backbone)
-{
-	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
-	
-	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
-	saveCurrentState();
-	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt clashes, clashesStart, bbClashes, bbClashesStart, chainNum = getNumChains(), plateau = 2000;
-	double Energy, pastEnergy = protEnergy(), deltaEnergy, sPhi, sPsi, nobetter = 0.0, KT = KB*Temperature();
-	//double rotX, rotY, rotZ, transX, transY, transZ;
-	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
-	bool sidechainTest, backboneTest, cofactorTest, revert, energyTest, boltzmannAcceptance;
-	vector <dblVec> currentCoords;
-	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
-	do{
-		//--choose random residue and set variables
-		randchain = rand() % chainNum, resnum = getNumResidues(randchain), randres = rand() % resnum;
-		clashesStart = getNumHardClashes(); nobetter++;
-		backboneTest = false, sidechainTest = false, cofactorTest = false, energyTest = false, revert = true;
-		/*if (isCofactor(randchain, randres))
-		{
-			//--Rock and Roll cofactor in site
-			cofactorTest = true;
-			currentCoords.clear();
-			currentCoords = saveCoords(randchain, randres);
-			rotX = rand() % 2, rotY = rand() % 2, rotZ = rand() % 2;
-			transX = (rand() % 30)/100, transY = (rand() % 30)/100, transZ = (rand() % 30)/100;
-			rotateChainRelative(randchain,X_axis,rotX), rotateChainRelative(randchain,Y_axis,rotY), rotateChainRelative(randchain,Z_axis,rotZ);
-			translateChain(randchain, transX, transY, transZ);
-			clashes = getNumHardClashes();
-			if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-			}
-		}
-		else{*/
-			//--Backbone conformation trial--------------------------------------------------------
-			if (_backbone) {backboneOrSidechain = rand() % 2;}
-			if (randres > 0 && randres < resnum-2 && backboneOrSidechain == 0){
-				backboneTest = true; bbClashesStart = getNumHardBackboneClashes();
-				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
-				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
-				setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-				bbClashes = getNumHardBackboneClashes();
-				if (bbClashes <= bbClashesStart){
-					energyTest = true; revert = false;
-				}
-			}
-			//--Sidechain conformation trial--------------------------------------------------------
-			else{
-				sidechainTest = true;
-				currentSidechainConf = getSidechainDihedrals(randchain, randres);
-				newSidechainConf = randContinuousSidechainConformation(randchain, randres);
-				setSidechainDihedralAngles(randchain, randres, newSidechainConf);
-				clashes = getNumHardClashes();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
-			}
-		//}
-		//--Energy-Test-------------------------------------------------------------------------
-		if (energyTest){
-			Energy = protEnergy();
-			deltaEnergy = Energy - pastEnergy;
-			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
-			if (boltzmannAcceptance){
-				pastEnergy = Energy;
-				if (deltaEnergy < -KT){nobetter = 0;}
-			}
-			else{revert = true;}
-		}
-		//--Revert conformation-----------------------------------------------------------------
-		if (revert){
-			if(cofactorTest)
-			{
-				setAllCoords(randchain, randres, currentCoords);
-			}
-			if(backboneTest){
-				setDihedral(randchain,randres,sPhi,0,0);
-				setDihedral(randchain,randres,sPsi,1,0);
-			}
-			if(sidechainTest){
-				setSidechainDihedralAngles(randchain, randres, currentSidechainConf);
-			}
-		}
-	} while (nobetter < plateau);
-	return;
-}
-
-void protein::protMin(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains)
-{
-	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
-	
-	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
-	saveCurrentState();
-	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt clashes, clashesStart, bbClashes, bbClashesStart, chainNum = _activeChains.size(), plateau = 1000;
-	double Energy, pastEnergy = protEnergy(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
-	//double rotX, rotY, rotZ, transX, transY, transZ;
-	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
-	bool sidechainTest, backboneTest, revert, cofactorTest, energyTest, skip, boltzmannAcceptance;
-	vector <dblVec> currentCoords;
-	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
-	do{
-		//--choose random residue not frozen of active chains
-			randchain = _activeChains[rand() % chainNum];
-			do{
-				skip = false;
-				randres = rand() % getNumResidues(randchain);
-				for (UInt i = 0; i < _frozenResidues.size(); i++)
-				{
-					if (randres == _frozenResidues[i]) {skip = true; break;}
-				}
-			} while (skip);
-		clashesStart = getNumHardClashes(); resnum = getNumResidues(randchain); nobetter++;
-		backboneTest = false, sidechainTest = false, cofactorTest = false, energyTest = false, revert = true;
-		
-		/*if (isCofactor(randchain, randres))
-		{
-			//--Rock and Roll cofactor in site
-			cofactorTest = true;
-			currentCoords.clear();
-			currentCoords = saveCoords(randchain, randres);
-			rotX = rand() % 2, rotY = rand() % 2, rotZ = rand() % 2;
-			transX = (rand() % 30)/100, transY = (rand() % 30)/100, transZ = (rand() % 30)/100;
-			rotateChainRelative(randchain,X_axis,rotX), rotateChainRelative(randchain,Y_axis,rotY), rotateChainRelative(randchain,Z_axis,rotZ);
-			translateChain(randchain, transX, transY, transZ);
-			clashes = getNumHardClashes();
-			if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-			}
-		}
-		else{*/
-			//--Backbone conformation trial--------------------------------------------------------
-			if (_backbone) {backboneOrSidechain = rand() % 2;}
-			if (randres > 0 && randres < resnum-2 && backboneOrSidechain == 0){
-				backboneTest = true; bbClashesStart = getNumHardBackboneClashes();
-				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
-				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
-				setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-				bbClashes = getNumHardBackboneClashes();
-				if (bbClashes <= bbClashesStart){
-					//clashes = getNumHardClashes();
-					//if (clashes <= clashesStart){
-						energyTest = true; revert = false;
-					//}
-				}
-			}
-			//--Sidechain conformation trial--------------------------------------------------------
-			else{
-				sidechainTest = true;
-				currentSidechainConf = getSidechainDihedrals(randchain, randres);
-				newSidechainConf = randContinuousSidechainConformation(randchain, randres);
-				setSidechainDihedralAngles(randchain, randres, newSidechainConf);
-				clashes = getNumHardClashes();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
-			}
-		//}
-		//--Energy-Test-------------------------------------------------------------------------
-		if (energyTest){
-			Energy = protEnergy();
-			deltaEnergy = Energy - pastEnergy;
-			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
-			if (boltzmannAcceptance){
-				pastEnergy = Energy;
-				if (deltaEnergy < -KT){nobetter = 0;}
-			}
-			else{revert = true;}
-		}
-		//--Revert conformation-----------------------------------------------------------------
-		if (revert){
-			if(cofactorTest)
-			{
-				setAllCoords(randchain, randres, currentCoords);
-			}
-			if(backboneTest){
-				setDihedral(randchain,randres,sPhi,0,0);
-				setDihedral(randchain,randres,sPsi,1,0);
-			}
-			if(sidechainTest){
-				setSidechainDihedralAngles(randchain, randres, currentSidechainConf);
-			}
-		}
-	} while (nobetter < plateau);
-	return;
-}
-
-void protein::protMin(bool _backbone, UInt chainIndex, UInt resIndex)
-{
-	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
-	
-	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
-	saveCurrentState();
-	UInt randchain = chainIndex, randres = resIndex, resnum, backboneOrSidechain = 1;
-	UInt clashes, clashesStart, bbClashes, bbClashesStart, plateau = 1000;
-	double Energy, pastEnergy = protEnergy(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
-	double rotX, rotY, rotZ, transX, transY, transZ;
-	vector < DouVec > currentSidechainConf, newSidechainConf; vector <double> backboneAngles(2);
-	bool sidechainTest, backboneTest, revert, cofactorTest, energyTest, boltzmannAcceptance;
-	vector <dblVec> currentCoords;
-	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
-	do{
-		clashesStart = getNumHardClashes(); resnum = getNumResidues(randchain); nobetter++;
-		backboneTest = false, sidechainTest = false,  cofactorTest = false, energyTest = false, revert = true;
-		
-		if (isCofactor(randchain, randres))
-		{
-			//--Rock and Roll cofactor in site
-			cofactorTest = true;
-			currentCoords.clear();
-			currentCoords = saveCoords(randchain, randres);
-			rotX = rand() % 2, rotY = rand() % 2, rotZ = rand() % 2;
-			transX = (rand() % 30)/100, transY = (rand() % 30)/100, transZ = (rand() % 30)/100;
-			rotateChainRelative(randchain,X_axis,rotX), rotateChainRelative(randchain,Y_axis,rotY), rotateChainRelative(randchain,Z_axis,rotZ);
-			translateChain(randchain, transX, transY, transZ);
-			clashes = getNumHardClashes();
-			if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-			}
-		}
-		else{
-			//--Backbone conformation trial--------------------------------------------------------
-			if (_backbone) {backboneOrSidechain = rand() % 2;}
-			if (randres > 0 && randres < resnum-2 && backboneOrSidechain == 0){
-				backboneTest = true; bbClashesStart = getNumHardBackboneClashes();
-				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
-				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
-				setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-				bbClashes = getNumHardBackboneClashes();
-				if (bbClashes <= bbClashesStart){
-					clashes = getNumHardClashes();
-					if (clashes <= clashesStart){
-						energyTest = true; revert = false;
-					}
-				}
-			}
-			//--Sidechain conformation trial--------------------------------------------------------
-			else{
-				sidechainTest = true;
-				currentSidechainConf = getSidechainDihedrals(randchain, randres);
-				newSidechainConf = randContinuousSidechainConformation(randchain, randres);
-				setSidechainDihedralAngles(randchain, randres, newSidechainConf);
-				clashes = getNumHardClashes();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
-			}
-		}
-		//--Energy-Test-------------------------------------------------------------------------
-		if (energyTest){
-			Energy = protEnergy();
-			deltaEnergy = Energy - pastEnergy;
-			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
-			if (boltzmannAcceptance){
-				pastEnergy = Energy;
-				if (deltaEnergy < -KT){nobetter = 0;}
-			}
-			else{revert = true;}
-		}
-		//--Revert conformation-----------------------------------------------------------------
-		if (revert){
-			if(cofactorTest)
-			{
-				setAllCoords(randchain, randres, currentCoords);
-			}
-			if(backboneTest){
-				setDihedral(randchain,randres,sPhi,0,0);
-				setDihedral(randchain,randres,sPsi,1,0);
-			}
-			if(sidechainTest){
-				setSidechainDihedralAngles(randchain, randres, currentSidechainConf);
-			}
-		}
-	} while (nobetter < plateau);
-	return;
-}
-
-void protein::protRelax(UInt _plateau, bool _backbone)
-{   // Sidechain and backrub optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
-	//_plateau: the number of consecutive optimization cycles without an energy decrease (default: 150 for general purpose optimization)
-	
-	saveCurrentState();
-	UInt pastProtClashes = getNumHardClashes();
-	if (pastProtClashes > 0)
-	{	
-		//--Initialize variables for loop, calculate starting energy and build energy vectors---------------
-		UInt randchain, randres, randrestype, resnum, randrot, chainNum = getNumChains(), protClashes, resClashes, medResC, nobetter = 0;
-		double sPhi, sPsi;
-		vector <double> backboneAngles(2);
-		vector < vector <double> > currentRot; vector <UIntVec> allowedRots; srand (time(NULL));
-
-		//--Run optimizaiton loop to relative minima, determined by _plateau----------------------------
-		do
-		{   //--choose random residue
-			randchain = rand() % chainNum;
-			resnum = getNumResidues(randchain);
-			randres = rand() % resnum;
-			randrestype = getTypeFromResNum(randchain, randres);
-			nobetter++;
-	
-			//--Rotamer optimization-----------------------------------------------------------------------
-			medResC = getMedianResidueNumHardClashes();
-			resClashes = getNumHardClashes(randchain, randres);
-			if (resClashes > medResC)
-			{
-				//--Backbone conformation trial--------------------------------------------------------
-				if (_backbone && randres > 0 && randres < resnum-1 && nobetter > _plateau/2){
-					sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
-					backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
-					setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-					protClashes = getNumHardClashes();
-					if (protClashes > pastProtClashes){
-						setDihedral(randchain,randres,sPhi,0,0); 
-						setDihedral(randchain,randres,sPsi,1,0);
-					}
-					else{nobetter = 0; pastProtClashes = protClashes;}
-				}
-				currentRot = getSidechainDihedrals(randchain, randres);
-				allowedRots = getAllowedRotamers(randchain, randres, randrestype);
-	
-				//--Try a max of one rotamer per branchpoint and keep if an improvement, else revert
-				for (UInt b = 0; b < residue::getNumBpt(randrestype); b++)
-				{
-					if (allowedRots[b].size() > 0)
-					{
-						randrot = rand() % allowedRots[b].size();
-						setRotamerWBC(randchain, randres, b, allowedRots[b][randrot]);
-						protClashes = getNumHardClashes();
-						if (protClashes < pastProtClashes)
-						{
-							nobetter = 0, pastProtClashes = protClashes; break;
-						}
-						else
-						{
-							setSidechainDihedralAngles(randchain, randres, currentRot);
-						}
-					}
-				}
-			}
-		} while (nobetter < _plateau);
-	}
-	return;
-}
-
-void protein::protRelax(UIntVec _frozenResidues, UIntVec _activeChains)
-{   // Sidechain and backrub optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
-	//_plateau: the number of consecutive optimization cycles without an energy decrease (default: 150 for general purpose optimization)
-	saveCurrentState();
-	UInt pastProtClashes = getNumHardClashes();
-	if (pastProtClashes > 0)
-	{	
-		//--Initialize variables for loop, calculate starting energy and build energy vectors---------------
-		UInt randchain, randres, randrestype, randrot, chainNum = _activeChains.size(), protClashes, resClashes, medResC, _plateau = 500, nobetter = 0;
-		vector < vector <double> > currentRot; vector <UIntVec> allowedRots; srand (time(NULL));
-		bool skip;
-		//--Run optimizaiton loop to relative minima, determined by _plateau----------------------------
-		do
-		{
-			//--choose random residue not frozen of active chains
-			randchain = _activeChains[rand() % chainNum];
-			do{
-				skip = false;
-				randres = rand() % getNumResidues(randchain);
-				for (UInt i = 0; i < _frozenResidues.size(); i++)
-				{
-					if (randres == _frozenResidues[i]) {skip = true; break;}
-				}
-			} while (skip);
-			randrestype = getTypeFromResNum(randchain, randres);
-			nobetter++;
-	
-			//--Rotamer optimization-----------------------------------------------------------------------
-			medResC = getMedianResidueNumHardClashes();
-			resClashes = getNumHardClashes(randchain, randres);
-			if (resClashes > medResC)
-			{
-				currentRot = getSidechainDihedrals(randchain, randres);
-				allowedRots = getAllowedRotamers(randchain, randres, randrestype);
-	
-				//--Try a max of one rotamer per branchpoint and keep if an improvement, else revert
-				for (UInt b = 0; b < residue::getNumBpt(randrestype); b++)
-				{
-					if (allowedRots[b].size() > 0)
-					{
-						randrot = rand() % allowedRots[b].size();
-						setRotamerWBC(randchain, randres, b, allowedRots[b][randrot]);
-						protClashes = getNumHardClashes();
-						if (protClashes < pastProtClashes)
-						{
-							nobetter = 0, pastProtClashes = protClashes; break;
-						}
-						else
-						{
-							setSidechainDihedralAngles(randchain, randres, currentRot);
-						}
-					}
-				}
-			}
-		} while (nobetter < _plateau);
-	}
-	return;
 }
 
 void protein::cofactorRelax(UInt _plateau)
@@ -4775,531 +4083,6 @@ vector <double> protein::getRandConformationFromBackboneType(double _phi, double
 	return angles;
 }
 
-void protein::optimizeRotamers()
-{
-	vector < UIntVec > activePositions;
-	vector < UIntVec > rotamerArray;
-	activePositions.resize(0);
-	rotamerArray.resize(0);
-	for (UInt i = 0; i < itsIndependentChainsMap.size(); i ++)
-	{
-		UInt indChain = itsIndependentChainsMap[i];
-		UIntVec activeRes = itsChains[indChain]->getActiveResidues();
-		for (UInt j = 0; j < activeRes.size(); j ++)
-		{
-			UIntVec tempRot = itsChains[indChain]->getAllowedRotamers(activeRes[j], getTypeFromResNum(indChain, activeRes[j]), 0);
-			if (tempRot.size() > 1)
-			{
-				UIntVec position;
-				position.resize(0);
-				position.push_back(indChain);
-				position.push_back(activeRes[j]);
-				activePositions.push_back(position);
-			}
-			else if (tempRot.size() == 1)
-			{
-				setRotamer(indChain, activeRes[j],0,tempRot[0]);
-			}
-		}
-	}
-	if (activePositions.size() > 0)
-	{
-		rotamerArray = rotamerDEE(activePositions);
-		vector < UIntVec > tempActivePositions;
-		tempActivePositions.resize(0);
-		vector < UIntVec > tempRotamerArray;
-		tempRotamerArray.resize(0);
-		for (UInt i = 0; i < activePositions.size(); i ++)
-		{
-			if (rotamerArray[i].size() > 1)
-			{
-				tempRotamerArray.push_back(rotamerArray[i]);
-				tempActivePositions.push_back(activePositions[i]);
-			}
-			else if (rotamerArray[i].size() == 1)
-			{
-				setRotamer(activePositions[i][0], activePositions[i][1], 0, rotamerArray[i][0]);
-			}
-		}
-		if (tempRotamerArray.size() != 0)
-		{
-			optimizeRotamers(tempActivePositions, tempRotamerArray);
-		}
-		else  // only one solution from DEE - map that onto the protein
-		{
-			for (UInt i = 0; i < activePositions.size(); i ++)
-			{
-				setRotamer(activePositions[i][0], activePositions[i][1], 0, rotamerArray[i][0]);
-			}
-		}
-	}
-	else
-	{
-		cout << "ERROR:  no positions to optimize rotamers for." << endl;
-	}
-	return;
-}
-
-void protein::optimizeRotamers(vector <UIntVec> _activePositions)
-{
-	vector <UIntVec> activePositions;
-	activePositions.resize(0);
-	for (UInt i = 0; i < _activePositions.size(); i ++)
-	{
-		UIntVec tempRot = itsChains[_activePositions[i][0]]->getAllowedRotamers(_activePositions[i][1], getTypeFromResNum(_activePositions[i][0], _activePositions[i][1]), 0);
-		if (tempRot.size() > 1)
-		{
-			activePositions.push_back(_activePositions[i]);
-		}
-		else if (tempRot.size() == 1)
-		{
-			setRotamer(_activePositions[i][0], _activePositions[i][1],0 , tempRot[0]);
-		}
-	}
-
-	vector < UIntVec > rotamerArray;
-	rotamerArray.resize(0);
-	if (activePositions.size() > 0)
-	{
-		rotamerArray = rotamerDEE(activePositions);
-		vector < UIntVec > tempActivePositions;
-		tempActivePositions.resize(0);
-		vector < UIntVec > tempRotamerArray;
-		tempRotamerArray.resize(0);
-		for (UInt i = 0; i < activePositions.size(); i ++)
-		{
-			if (rotamerArray[i].size() > 1)
-			{
-				tempRotamerArray.push_back(rotamerArray[i]);
-				tempActivePositions.push_back(activePositions[i]);
-			}
-			else if (rotamerArray[i].size() == 1)
-			{
-				setRotamer(activePositions[i][0], activePositions[i][1], 0, rotamerArray[i][0]);
-			}
-		}
-		if (tempRotamerArray.size() != 0)
-		{
-			optimizeRotamers(tempActivePositions, tempRotamerArray);
-		}
-		else  // only one solution from DEE - map that onto the protein
-		{
-			for (UInt i = 0; i < activePositions.size(); i ++)
-			{
-				setRotamer(activePositions[i][0], activePositions[i][1], 0, rotamerArray[i][0]);
-			}
-		}
-	}
-	else
-	{
-		cout << "ERROR:  no positions to optimize rotamers for." << endl;
-	}
-	return;
-}
-
-void protein::optimizeRotamers(vector <UIntVec> _activePositions, vector <UIntVec> _rotamerArray)
-{
-	double lowestEnergy = 1E10;
-	UIntVec currentRotamerArray;
-	currentRotamerArray.resize(0);
-	UIntVec bestRotamerArray;
-	// initialize bestRotamerArray
-	bestRotamerArray.resize(0);
-	for (UInt i = 0; i < _rotamerArray.size(); i ++)
-	{
-		bestRotamerArray.push_back(_rotamerArray[i][0]);
-	}
-	// run through rotamer combinations ...
-	for (UInt i = 0; i < _rotamerArray[0].size(); i ++)
-	{
-		UInt index = 0;
-		setRotamer(_activePositions[0][0], _activePositions[0][1], 0, _rotamerArray[0][i]);
-		if (_activePositions.size() != 1) // if the first is not the only position
-		{
-			currentRotamerArray.push_back(_rotamerArray[0][i]);
-			bestRotamerArray = getEnergySurface(_activePositions, _rotamerArray, currentRotamerArray, bestRotamerArray, index + 1, lowestEnergy);
-			currentRotamerArray.pop_back();
-		}
-	}
-	// set protein to best rotamer set
-	if (bestRotamerArray.size() == _activePositions.size())
-	{
-		for (UInt i = 0; i < _activePositions.size(); i ++)
-		{
-			setRotamer(_activePositions[i][0], _activePositions[i][1], 0, bestRotamerArray[i]);
-		}
-		// optimizeSmallRotations(_activePositions);
-	}
-	else
-	{
-		cout << "ERROR in optimizeRotamers... size of best array doesnt match the number of active positions" << endl;
-	}
-	return;
-}
-
-UIntVec protein::getEnergySurface(vector <UIntVec> _activePositions, vector <UIntVec> _rotamerArray, UIntVec _currentArray, UIntVec _bestArray, UInt _index, double& _lowestEnergy)
-{
-	if (_index < _activePositions.size())
-	{
-		for (UInt i = 0; i < _rotamerArray[_index].size(); i ++)
-		{
-			setRotamer(_activePositions[_index][0], _activePositions[_index][1], 0, _rotamerArray[_index][i]);
-			_currentArray.push_back(_rotamerArray[_index][i]);
-			_bestArray = getEnergySurface(_activePositions, _rotamerArray, _currentArray, _bestArray, _index + 1, _lowestEnergy);
-			_currentArray.pop_back();
-		}
-		return _bestArray;
-	}
-	else
-	{
-		double energy = intraEnergy();
-		if (messagesActive)
-		{
-			for (UInt i = 0; i < _currentArray.size(); i ++ )
-			{
-				cout << _currentArray[i] << " ";
-			}
-			cout << "\tLOW:  " << _lowestEnergy << " CUR:  " << energy << endl;
-		}
-		if (_lowestEnergy > energy)
-		{
-			_lowestEnergy = energy;
-			_bestArray = _currentArray;
-		}
-		return _bestArray;
-	}
-}
-
-vector <UIntVec> protein::rotamerDEE()
-{
-	// create list of active positions
-	vector < UIntVec > activePositions;
-	vector < UIntVec > rotamerArray;
-	for (UInt i = 0; i < itsIndependentChainsMap.size(); i ++)
-	{
-		UInt indChain = itsIndependentChainsMap[i];
-		UIntVec activeRes = itsChains[i]->getActiveResidues();
-		for (UInt j = 0; j < activeRes.size(); j ++)
-		{
-			UIntVec tempRot = itsChains[indChain]->getAllowedRotamers(activeRes[j], getTypeFromResNum(indChain, activeRes[j]), 0);
-			if (tempRot.size() > 1)
-			{
-				UIntVec position;
-				position.resize(0);
-				position.push_back(indChain);
-				position.push_back(activeRes[j]);
-				activePositions.push_back(position);
-			}
-		}
-	}
-	rotamerArray = rotamerDEE(activePositions);
-	return rotamerArray;
-}
-
-vector < UIntVec > protein::rotamerDEE(vector <UIntVec> _activePositions)
-{
-	vector <UIntVec> rotamerArray;
-	rotamerArray.resize(0);
-	vector < vector < bool > > flagArray;
-	flagArray.resize(0);
-	for (UInt i = 0; i < _activePositions.size(); i ++)
-	{
-		rotamerArray.push_back(itsChains[_activePositions[i][0]]->getAllowedRotamers(_activePositions[i][1], getTypeFromResNum(_activePositions[i][0], _activePositions[i][1]), 0));
-		vector < bool > tempFlagList;
-		for (UInt j = 0; j < rotamerArray[i].size(); j ++)
-		{
-			tempFlagList.push_back(true);
-		}
-		flagArray.push_back(tempFlagList);
-	}
-	UInt count = 1;
-	for (UInt i = 0; i < rotamerArray.size(); i ++)
-	{
-		count *= rotamerArray[i].size();
-	}
-	if (messagesActive) cout << "Starting number of rotamers: " << count << endl;
-	double Eir, Eit, Esum, Emin;
-	for (UInt i = 0; i < _activePositions.size(); i ++)
-	{
-		UInt chain1 = _activePositions[i][0];
-		UInt res1 = _activePositions[i][1];
-		for (UInt r = 0; r < rotamerArray[i].size(); r ++)
-		{
-			bool irDE = false;
-			setRotamer(chain1, res1, 0, rotamerArray[i][r]);
-			Eir = getSelfEnergy(chain1, res1);
-			if (Eir > 1E3) irDE=true;
-			if (!irDE)
-			{
-				for (UInt t = 0; t < rotamerArray[i].size(); t ++)
-				{
-					if (r != t && !irDE)
-					{
-						setRotamer(chain1,res1, 0, rotamerArray[i][t]);
-						Eit = getSelfEnergy(chain1, res1);
-						Esum = 0.0;
-						for (UInt j = 0; j < _activePositions.size(); j++)
-						{
-							UInt chain2 = _activePositions[j][0];
-							UInt res2 = _activePositions[j][1];
-
-							UInt indChainIndex1 = 0;
-							UInt indChainIndex2 = 0;
-
-							for (UInt n = 0; n < itsIndependentChainsMap.size(); n ++)
-							{
-								if (itsIndependentChainsMap[n] == chain1) indChainIndex1 = n;
-								if (itsIndependentChainsMap[n] == chain2) indChainIndex2 = n;
-							}
-							UInt numSymLinkedChains1 = itsChainLinkageMap[indChainIndex1].size();
-							UInt numSymLinkedChains2 = itsChainLinkageMap[indChainIndex2].size();
-							if (i != j)
-							{
-								Emin = 1E20;
-								for (UInt s = 0; s < rotamerArray[j].size(); s ++)
-								{
-									setRotamer(chain2, res2, 0, rotamerArray[j][s]);
-									setRotamer(chain1, res1, 0, rotamerArray[i][r]);
-									double Etemp = getResPairEnergy(chain1, res1, chain2, res2);
-									for (UInt n = 0; n < numSymLinkedChains2; n ++)
-									{
-										if (itsChainLinkageMap[indChainIndex2][n] != -1)
-										{
-											UInt chain2sym = itsChainLinkageMap[indChainIndex2][n];
-											Etemp += getResPairEnergy(chain1, res1, chain2sym, res2);
-										}
-									}
-									setRotamer(chain1, res1, 0, rotamerArray[i][t]);
-									Etemp -= getResPairEnergy(chain1, res1, chain2, res2);
-									for (UInt n = 0; n < numSymLinkedChains2; n ++)
-									{
-										if (itsChainLinkageMap[indChainIndex2][n] != -1)
-										{
-											UInt chain2sym = itsChainLinkageMap[indChainIndex2][n];
-											Etemp -= getResPairEnergy(chain1, res1, chain2sym, res2);
-										}
-									}
-									if (Emin > Etemp) Emin = Etemp;
-								}
-								Esum += Emin;
-							}
-							else if (i == j)
-							{
-								Emin = 1E20;
-								setRotamer(chain1, res1, 0, rotamerArray[i][r]);
-								double Etemp = 0.0;
-								for (UInt n = 0; n < numSymLinkedChains1; n ++)
-								{
-									if (itsChainLinkageMap[indChainIndex1][n] != -1)
-									{
-										UInt chain1sym = itsChainLinkageMap[indChainIndex1][n];
-										Etemp += getResPairEnergy(chain1, res1, chain1sym, res1);
-									}
-								}
-								setRotamer(chain1, res1, 0, rotamerArray[i][t]);
-								for (UInt n = 0; n < numSymLinkedChains1; n ++)
-								{
-									if (itsChainLinkageMap[indChainIndex1][n] != -1)
-									{
-										UInt chain1sym = itsChainLinkageMap[indChainIndex1][n];
-										Etemp -= getResPairEnergy(chain1, res1, chain1sym, res1);
-									}
-								}
-								if (Emin > Etemp) Emin = Etemp;
-								Esum += Emin;
-							}
-						}
-						double total = Eir - Eit + Esum;
-						if (total > 0)
-						{
-							irDE = true; // ir is dead endin
-						}
-					}
-				}
-			}
-			if  (irDE)
-			{
-				if (messagesActive) cout << "residue " << chain1 << " " << res1 << " rotamer " << rotamerArray[i][r] << " is deadEnding" <<endl;
-				flagArray[i][r] = false;
-			}
-		}
-	}
-	// generate final rotamer array
-	vector <UIntVec> finalArray;
-	finalArray.resize(0);
-	for (UInt i = 0; i < rotamerArray.size(); i ++)
-	{
-		UIntVec tempArray;
-		tempArray.resize(0);
-		for (UInt j = 0; j < rotamerArray[i].size(); j ++)
-		{
-			if (flagArray[i][j])
-			{
-				tempArray.push_back(rotamerArray[i][j]);
-			}
-		}
-		if (tempArray.size() == 0) // DEE failed ...
-		{
-			for (UInt j = 0; j < rotamerArray[i].size(); j ++)
-			{
-				tempArray.push_back(rotamerArray[i][j]);
-			}
-		}
-		finalArray.push_back(tempArray);
-	}
-
-	count = 1;
-	for (UInt i = 0; i < finalArray.size(); i ++)
-	{
-		if (finalArray[i].size() != 0) count *= finalArray[i].size();
-		else
-		{
-			cout << "ERROR: " << _activePositions[i][0] << " " << _activePositions[i][1] << " has zero rotamers.  Error\n";
-			exit(1);
-		}
-	}
-	if (messagesActive) cout << "DEE:  ending number of rotamers = " << count << endl;
-	return finalArray;
-}
-
-void protein::optimizeSmallRotations(UInt _steps, double _stepSize)
-{
-	vector < UIntVec > activePositions;
-	for (UInt i = 0; i < itsIndependentChainsMap.size(); i ++)
-	{
-		UInt indChain = itsIndependentChainsMap[i];
-		UIntVec activeRes = itsChains[indChain]->getActiveResidues();
-		for (UInt j = 0; j < activeRes.size(); j ++)
-		{
-			UInt numChis = itsChains[indChain]->getNumChis(j,0);
-			if (numChis > 0)
-			{
-				UIntVec position;
-				position.resize(0);
-				position.push_back(indChain);
-				position.push_back(activeRes[j]);
-				activePositions.push_back(position);
-			}
-		}
-	}
-	optimizeSmallRotations(activePositions, _steps, _stepSize);
-	return;
-}
-
-void protein::optimizeSmallRotations(vector <UIntVec> _activePositions, UInt _steps, double _stepSize)
-{
-	vector <UIntVec> activePositions;
-	activePositions.resize(0);
-	for (UInt i = 0; i < _activePositions.size(); i ++)
-	{
-		UIntVec tempRot = itsChains[_activePositions[i][0]]->getAllowedRotamers(_activePositions[i][1], getTypeFromResNum(_activePositions[i][0], _activePositions[i][1]), 0);
-		if (tempRot.size() > 1)
-		{
-			activePositions.push_back(_activePositions[i]);
-		}
-	}
-
-	UInt activePos = 0;
-	double lowestEnergy = 1E20;
-	vector < vector < double > > bestChiArray;
-	bestChiArray.resize(0);
-	for (UInt i = 0; i < activePositions.size(); i ++)
-	{
-		vector <vector <double> > dihedrals = itsChains[activePositions[i][0]]->getDihedrals(activePositions[i][1]);
-		bestChiArray.push_back(dihedrals[0]);
-	}
-	UInt numChis = itsChains[activePositions[activePos][0]]->getNumChis(activePositions[activePos][1],0);
-	if (numChis > 0)
-	{
-		for (UInt chiPos = 0; chiPos < numChis; chiPos ++)
-		{
-			for (UInt step = 0; step <= _steps; step ++) // to do last pos, need one more step
-			{
-				if (step == 0) // set dihedral at first position
-				{
-                    double angle = -0.5 * _steps*(double)_stepSize; //changed div to mult "-1*_steps*(double)_stepSize/2.0;"
-					itsChains[activePositions[activePos][0]]->setRelativeChi(activePositions[activePos][1], 0, chiPos, angle);
-				}
-				else          // increment rotation
-				{
-					itsChains[activePositions[activePos][0]]->setRelativeChi(activePositions[activePos][1], 0, chiPos, _stepSize);
-				}
-				if (activePos < activePositions.size())
-				{
-					bestChiArray = getRotationEnergySurface(activePositions, _steps, _stepSize, activePos + 1, bestChiArray, lowestEnergy);
-				}
-				else
-				{
-					double energy = intraEnergy();
-					if (lowestEnergy > energy)
-					{
-						lowestEnergy = energy;
-						bestChiArray.resize(0);
-						for (UInt i = 0; i < activePositions.size(); i ++)
-						{
-							vector <vector <double> > dihedrals = itsChains[activePositions[i][0]]->getDihedrals(activePositions[i][1]);
-							bestChiArray.push_back(dihedrals[0]);
-						}
-					}
-				}
-			}
-		}
-	}
-	for (UInt i = 0; i < activePositions.size(); i ++)
-	{
-		itsChains[activePositions[i][0]]->setDihedrals(activePositions[i][1], 0, bestChiArray[i]);
-	}
-	return;
-}
-
-vector < vector < double > > protein::getRotationEnergySurface(vector < UIntVec > _active, UInt _steps, double _stepSize, UInt _activePos, vector <vector<double> > _bestChiArray, double &_lowestEnergy)
-{
-	if (_activePos < _active.size())
-	{
-		UInt numChis = itsChains[_active[_activePos][0]]->getNumChis(_active[_activePos][1],0);
-		if (numChis > 0)
-		{
-			for (UInt chiPos = 0; chiPos < numChis; chiPos ++)
-			{
-				for (UInt step = 0; step <= _steps; step ++)
-				{
-					if (step == 0) // set dihedral at first position
-					{
-                        double angle = -0.5 * _steps*(double)_stepSize; //changed div to mult "-1*_steps*(double)_stepSize/2.0;"
-						itsChains[_active[_activePos][0]]->setRelativeChi(_active[_activePos][1], 0, chiPos, angle);
-					}
-					else          // increment rotation
-					{
-						itsChains[_active[_activePos][0]]->setRelativeChi(_active[_activePos][1], 0, chiPos, _stepSize);
-					}
-					_bestChiArray = getRotationEnergySurface(_active, _steps, _stepSize, _activePos + 1, _bestChiArray, _lowestEnergy);
-				}
-			}
-		}
-		else
-		{
-			_bestChiArray = getRotationEnergySurface(_active, _steps, _stepSize, _activePos + 1, _bestChiArray, _lowestEnergy);
-		}
-	}
-	else
-	{
-		double energy = intraEnergy();
-		if (_lowestEnergy > energy)
-		{
-			_lowestEnergy = energy;
-			_bestChiArray.resize(0);
-			if (messagesActive) cout << "bestEnergy ... " << _lowestEnergy << endl;
-			for (UInt i = 0; i < _active.size(); i ++)
-			{
-				vector <vector <double> > dihedrals = itsChains[_active[i][0]]->getDihedrals(_active[i][1]);
-				_bestChiArray.push_back(dihedrals[0]);
-				//listDihedrals();
-			}
-		}
-	}
-	return _bestChiArray;
-}
-
 void protein::saveState(string _fileName)
 {
 	if (messagesActive) cout << " writing file " << _fileName << endl;
@@ -5314,286 +4097,6 @@ void protein::saveState(string& _fileName)
 	return;
 }
 
-void protein::optimizeSmallRotations( UIntVec _activePosition, UInt _steps, double _stepSize)
-{
-
-	UIntVec tempRot = itsChains[_activePosition[0]]->getAllowedRotamers(_activePosition[1], getTypeFromResNum(_activePosition[0], _activePosition[1]), 0);
-	if (tempRot.size() <= 1)
-	{
-		if (messagesActive) cout << "no small rotations to optimize.  " << endl;
-		return;
-	}
-
-	double lowestEnergy = 1E20;
-	vector < double > bestChiArray;
-	bestChiArray.resize(0);
-	vector < vector < double > > tempDihedral;
-	tempDihedral = itsChains[_activePosition[0]]->getDihedrals(_activePosition[1]);
-	bestChiArray = tempDihedral[0];
-	UInt numChis = itsChains[_activePosition[0]]->getNumChis(_activePosition[1],0);
-	if (numChis > 0)
-	{
-		UInt chiPos = 0;
-		for (UInt step = 0; step <= _steps; step ++) // to do last pos, need one more step
-		{
-			if (step == 0) // set dihedral at first position
-			{
-                double angle = -0.5 * _steps*(double)_stepSize; //changed div to mult "-1*_steps*(double)_stepSize/2.0;"
-				itsChains[_activePosition[0]]->setRelativeChi(_activePosition[1], 0, chiPos, angle);
-			}
-			else          // increment rotation
-			{
-				itsChains[_activePosition[0]]->setRelativeChi(_activePosition[1], 0, chiPos, _stepSize);
-			}
-			if (chiPos < numChis)
-			{
-				bestChiArray = getRotationEnergySurface(_activePosition, _steps, _stepSize, chiPos + 1, bestChiArray, lowestEnergy);
-			}
-			else
-			{
-				double energy = getPositionEnergy(_activePosition);
-				if (lowestEnergy > energy)
-				{
-					lowestEnergy = energy;
-					bestChiArray.resize(0);
-					vector <vector <double> > dihedrals = itsChains[_activePosition[0]]->getDihedrals(_activePosition[1]);
-					bestChiArray = dihedrals[0];
-				}
-			}
-		}
-	}
-	itsChains[_activePosition[0]]->setDihedrals(_activePosition[1], 0, bestChiArray);
-	return;
-}
-
-vector < double >  protein::getRotationEnergySurface(UIntVec  _active, UInt _steps, double _stepSize, UInt _chiPos, vector <double>  _bestChiArray, double &_lowestEnergy)
-{
-	UInt numChis = itsChains[_active[0]]->getNumChis(_active[1],0);
-	if (_chiPos < numChis)
-	{
-		for (UInt step = 0; step <= _steps; step ++)
-		{
-			if (step == 0) // set dihedral at first position
-			{
-                double angle = -0.5 * _steps*(double)_stepSize; //changed div to mult "-1*_steps*(double)_stepSize/2.0;"
-				itsChains[_active[0]]->setRelativeChi(_active[1], 0, _chiPos, angle);
-			}
-			else          // increment rotation
-			{
-				itsChains[_active[0]]->setRelativeChi(_active[1], 0, _chiPos, _stepSize);
-			}
-			_bestChiArray = getRotationEnergySurface(_active, _steps, _stepSize, _chiPos + 1, _bestChiArray, _lowestEnergy);
-		}
-	}
-	else
-	{
-		double energy = getPositionEnergy(_active);
-		vector <vector <double> > dihedrals = itsChains[_active[0]]->getDihedrals(_active[1]);
-		if (_lowestEnergy > energy)
-		{
-			_lowestEnergy = energy;
-			_bestChiArray.resize(0);
-			if (messagesActive) cout << _active[0] << " " << _active[1] << " bestEnergy ... " << _lowestEnergy;
-			_bestChiArray = dihedrals[0];
-			if (messagesActive)
-			{
-				for (UInt i = 0; i < _bestChiArray.size(); i ++)
-				{
-					cout << " " << _bestChiArray[i];
-				}
-				cout << endl;
-			}
-		}
-	}
-	return _bestChiArray;
-}
-
-double protein::getHBondEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2)
-{
-    enum aminoAcid {A, R, N, D, C, Q, E, G, H, I, L, K, M, F, P, S, T, W, Y, V};
-
-    UInt type1 = getTypeFromResNum(_chain1, _res1);
-    UInt type2 = getTypeFromResNum(_chain2, _res2);
-
-    vector <dblVec> donorList(0);
-    vector <dblVec> donorBaseList(0);
-    vector <dblVec> acceptorList(0);
-    vector <dblVec> acceptorBaseList(0);
-    vector <double> donorAngleList(0);
-    vector <double> acceptorAngleList(0);
-
-
-    for (UInt i = 1; i <= 2; i ++)
-    {
-        UInt chain, res, type;
-        if (i == 1)
-        {
-            chain = _chain1;
-            res = _res1;
-            type = type1;
-        }
-        if (i == 2)
-        {
-            chain = _chain2;
-            res = _res2;
-            type = type2;
-        }
-
-        if (type == H)
-        {
-            dblVec donor = getCoords(chain,res,"NE2");
-            dblVec temp1 = getCoords(chain,res,"CE1");
-            dblVec temp2 = getCoords(chain,res,"CD2");
-            dblVec donorBase = (temp1 + temp2) * 0.5; // converted div to multi "donorBase = (temp1 + temp2)/2.0;"
-            dblVec acceptor = getCoords(chain,res,"ND1");
-            temp2 = getCoords(chain,res,"CG");
-            dblVec acceptorBase = (temp1 + temp2) * 0.5; // converted div to mult "acceptorBase = (temp1 + temp2) / 2.0;"
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(180.0);
-            acceptorAngleList.push_back(180.0);
-        }
-        if (type == T)
-        {
-            dblVec donor = getCoords(chain,res,"OG1");
-            dblVec donorBase = getCoords(chain,res,"CB");
-            dblVec acceptor = getCoords(chain,res,"OG1");
-            dblVec acceptorBase = getCoords(chain,res,"CB");
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(109.0);
-            acceptorAngleList.push_back(109.0);
-        }
-        if (type == S)
-        {
-            dblVec donor = getCoords(chain,res,"OG");
-            dblVec donorBase = getCoords(chain,res,"CB");
-            dblVec acceptor = getCoords(chain,res,"OG");
-            dblVec acceptorBase = getCoords(chain,res,"CB");
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(109.0);
-            acceptorAngleList.push_back(109.0);
-        }
-        if (type == Y)
-        {
-            dblVec donor = getCoords(chain,res,"OH");
-            dblVec donorBase = getCoords(chain,res,"CZ");
-            dblVec acceptor = getCoords(chain,res,"OH");
-            dblVec acceptorBase = getCoords(chain,res,"CZ");
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(109.0);
-            acceptorAngleList.push_back(109.0);
-        }
-      if (type == N)
-        {
-            dblVec donor = getCoords(chain,res,"ND2");
-            dblVec donorBase = getCoords(chain,res,"CG");
-            dblVec acceptor = getCoords(chain,res,"OD1");
-            dblVec acceptorBase = getCoords(chain,res,"CG");
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(120.0);
-            acceptorAngleList.push_back(180.0);
-        }
-        if (type == Q)
-        {
-            dblVec donor = getCoords(chain,res,"NE2");
-            dblVec donorBase = getCoords(chain,res,"CD");
-            dblVec acceptor = getCoords(chain,res,"OOE1");
-            dblVec acceptorBase = getCoords(chain,res,"CD");
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            acceptorList.push_back(acceptor);
-            acceptorBaseList.push_back(acceptorBase);
-            donorAngleList.push_back(120.0);
-            acceptorAngleList.push_back(180.0);
-        }
-        if (type == D)
-        {
-            dblVec acceptor1 = getCoords(chain,res,"OD1");
-            dblVec acceptor2 = getCoords(chain,res,"OD2");
-            dblVec acceptorBase = getCoords(chain,res,"CG");
-            acceptorList.push_back(acceptor1);
-            acceptorList.push_back(acceptor2);
-            acceptorBaseList.push_back(acceptorBase);
-            acceptorBaseList.push_back(acceptorBase);
-            acceptorAngleList.push_back(180.0);
-            acceptorAngleList.push_back(180.0);
-        }
-        if (type == E)
-        {
-            dblVec acceptor1 = getCoords(chain,res,"OE1");
-            dblVec acceptor2 = getCoords(chain,res,"OE2");
-            dblVec acceptorBase = getCoords(chain,res,"CD");
-            acceptorList.push_back(acceptor1);
-            acceptorList.push_back(acceptor2);
-            acceptorBaseList.push_back(acceptorBase);
-            acceptorBaseList.push_back(acceptorBase);
-            acceptorAngleList.push_back(180.0);
-            acceptorAngleList.push_back(180.0);
-        }
-        if (type == W)
-        {
-            dblVec donor = getCoords(chain,res,"NE1");
-            dblVec temp1 = getCoords(chain,res,"CD1");
-            dblVec temp2 = getCoords(chain,res,"CE2");
-            dblVec donorBase = (temp1 + temp2) * 0.5; // converted div to multi "donorBase = (temp1 + temp2)/2.0;"
-            donorList.push_back(donor);
-            donorBaseList.push_back(donorBase);
-            donorAngleList.push_back(180.0);
-        }
-        dblVec carbonyl = getCoords(chain,res,"O");
-        dblVec carbonylC = getCoords(chain,res,"C");
-        acceptorList.push_back(carbonyl);
-        acceptorBaseList.push_back(carbonylC);
-        acceptorAngleList.push_back(120);
-    }
-    double energy = 0.0;
-    if (donorList.size() == 0) return 0.0;
-
-   for (UInt i = 0; i < donorList.size(); i ++)
-    {
-        for (UInt j = 0; j < acceptorList.size(); j ++)
-        {
-            dblVec DDB = donorList[i] - donorBaseList[i];
-            dblVec DA = donorList[i] - acceptorList[j];
-            dblVec AAB = acceptorList[j] - acceptorBaseList[j];
-
-            double magDDB = sqrt(CMath::dotProduct(DDB,DDB));
-            double magDA = sqrt(CMath::dotProduct(DA,DA));
-            double magAAB = sqrt(CMath::dotProduct(AAB,AAB));
-
-            double thisE;
-            if (magDA < 1e-50) thisE = 0.0;
-            else
-            {
-
-                double donorAngle = acos( CMath::dotProduct(DA,DDB)/(magDDB*magDA) );
-                double acceptorAngle = acos( CMath::dotProduct(DA,AAB)/(magDA*magAAB) );
-
-                double distRatio = 2.8 / magDA;
-                thisE = 2.0 *(5.0*pow(distRatio,12.0)-6.0*pow(distRatio,10.0));
-                double angleFactor1 = cos(donorAngleList[i]*PI * 0.00555555555-donorAngle); //converted div to mult "cos(donorAngleList[i]*PI/180.0-donorAngle)"
-                double angleFactor2 = cos(acceptorAngleList[j]*PI * 0.00555555555-acceptorAngle);//converted div to mult "cos(acceptorAngleList[j]*PI/180.0-acceptorAngle)"
-                thisE = thisE * pow(angleFactor1, 2.0) * pow (angleFactor2, 2.0);
-            }
-            energy += thisE;
-        }
-    }
-    return energy;
-}
 //this function will calculate the hammingdistance between two sequences obtained from two pdb files
 double protein::getHammingDistance(vector<string>seq1,vector<string>seq2) 
 { 

@@ -144,17 +144,8 @@ public:
 	void cofactorRelax(UInt _plateau);
 	void protMin(bool _backbone);
 	void protMin(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains);
-	void protMin(bool _backbone, UInt chainIndex, UInt resIndex);
-	void optimizeSmallRotations(UInt _steps, double _stepSize);
-	void optimizeSmallRotations(vector <UIntVec> _positions, UInt _steps, double _stepSize);
-	void optimizeSmallRotations(UIntVec _position, UInt _steps, double _stepSize);
 	vector <vector < double > > getRotationEnergySurface(vector < UIntVec > _active, UInt _steps, double _stepSize, UInt _activePos, vector <vector< double > > _bestChiArray, double &_lowestEnergy);
 	vector < double >  getRotationEnergySurface(UIntVec _active, UInt _steps, double _stepSize, UInt _chiPos, vector <double>  _bestChiArray, double &_lowestEnergy);
-	vector <UIntVec> rotamerDEE();
-	vector <UIntVec> rotamerDEE(vector <UIntVec> _activePositions);
-	void optimizeRotamers();
-	void optimizeRotamers(vector <UIntVec> _positions);
-	void optimizeRotamers(vector <UIntVec> _positions, vector <UIntVec> _rotamerArray);
 	bool isCofactor(UInt chainIndex, UInt resIndex){return itsChains[chainIndex]->isCofactor(resIndex);}   
 
 	//--Energy functions
@@ -181,7 +172,6 @@ public:
 	double getSolvationEnergy(UInt _chainIndex, UInt _residueIndex) {return itsChains[_chainIndex]->getSolvationEnergy(_residueIndex); }
 	double getAtomCharge(UInt _chainNum, UInt _resNum, UInt _atomNum) { return itsChains[_chainNum]->getAtomCharge(_resNum, _atomNum); }
 	double calculateHCA_O_hBondEnergy();
-	UIntVec getEnergySurface(vector <UIntVec> _activePositions, vector <UIntVec> _rotamerArray, UIntVec _currentArray, UIntVec _bestArray, UInt _index, double& _lowestEnergy);
 	double getHBondEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2);
 	double getResPairEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2);
 	double getIntraEnergy(const UInt _chainIndex1, const UInt _resIndex1, const UInt _atomIndex1, const UInt _chainIndex2, const UInt _resIndex2, const UInt _atomIndex2);
@@ -204,10 +194,7 @@ public:
 	//void updateResidueIndependentDielectrics(UInt _chainIndex, UInt _resIndex);
 	double intraEnergy(const UInt _chain);
 	double intraEnergy(UInt _chain1, UInt _chain2);
-	double getPositionEnergy(vector <int> _position);
-	double getPositionEnergy(vector <UInt> _position);
 	double getRotamerEnergy(UInt _chain, UInt _residue) { return itsChains[_chain]->rotamerEnergy(_residue); }
-	double getPositionEnergy(UInt _chainIndex, UInt _residueIndex);
 	double getSelfEnergy(UInt _chainIndex, UInt _residueIndex);
 	vector <double> protLigandBindingEnergy(UInt ligChainIndex, UInt ligResIndex);
 	static void setTemperature( const double _temp ) { residue::setTemperature(_temp); }
@@ -223,6 +210,9 @@ public:
 	double protEnergyCU();
 	double protEnergyCU(UInt _chainIndex);
 	void updateDielectricsCU();
+	void updateResidueEnergiesCU();
+	void updateResidueClashesCU();
+	UInt getNumHardBackboneClashesCU();
 	int getNumClashesCU();
 	void buildEnergyContext();
 	int itsDisulfideCount;

@@ -202,7 +202,6 @@ private:
 	bool isClash(UInt _index1, residue* _other, UInt _index2);
 	UInt getNumHardClashes(residue* _other);
 	UInt getNumHardClashes();
-	UInt getNumHardBackboneClashes(residue* _other);
 
 
 	// Total Residues
@@ -252,13 +251,7 @@ public:
 
 	// utilities
 	void printCoords() const;
-	double intraEnergy();
-	double intraSoluteEnergy();
-	void polarizability();
-	void polarizability(residue* _other);
 	void updateMovedDependence(residue* _other, UInt _EorC);
-	void calculateDielectrics();
-    double calculateSolvationEnergy(UInt _atomIndex);
 	double configurationEntropy();
     double getSolvationEnergy();
     double getDielectric();
@@ -267,11 +260,6 @@ public:
     double approximateDipoleDipolePolarization(UInt _atomIndex1, UInt _atomIndex2);
     double approximateDipoleDipolePolarization(UInt _atomIndex1, residue *_other, UInt _atomIndex2);
 	double getIntraEnergy(const UInt atom1, residue* _other, const UInt atom2);
-	double interEnergy(residue* _other);
-	double interSoluteEnergy(residue* _other);
-	double getSoluteEnergy(UInt atomIndex, residue* _other, UInt otherAtomIndex);
-	double getSelfEnergy(residue* _other);
-	double calculateHCA_O_hBondEnergy(residue* _other);
 	double getVolume(UInt _method);
 	double getVDWRadius(UInt _index);
 	string getAmberTypeName(UInt _index);
@@ -363,16 +351,13 @@ public:
 	// total to be exact -- the previous scheme halved each pair count before
 	// storing it, which truncated odd counts and lost a pair.
 	void setClashes (UInt _clashes);
-	void sumClashes (UInt _clashes);
 	UInt getClashes() const {return clashes;}
 	void setIntraClashes (UInt _clashes) {intraClashes = _clashes;}
 	void sumIntraClashes (UInt _clashes) {intraClashes += _clashes;}
 	UInt getIntraClashes() const {return intraClashes;}
 	void setBackboneClashes (UInt _clashes);
-	void sumBackboneClashes (UInt _clashes);
 	UInt getBackboneClashes() const {return clashesB;}
 	void setEnergy (double _energy);
-	void sumEnergy (double _energy);
 	double getEnergy() const {return Energy;}
 	void setResiduesPerTurnType(UInt _RPT);
 	UInt getResiduesPerTurn() const {return RPT;}

@@ -158,14 +158,9 @@ public:
 	int chooseNextTargetPosition(ran& _ran);
 	UInt chooseNextMutationIdentity(ran& _ran, vector <int> _position) { return chooseTargetIdentity(_position[2],_ran); }
 	residue* superimposeGLY(const UInt _residue);
-	double calculateHCA_O_hBondEnergy(chain* _other);
 	UInt getBackboneClashes();
-	void updateBackboneClashes(chain* _other);
-	void updateBackboneClashes();
 	UInt getClashes();
 	UInt getIntraClashes();
-	void updateClashes(chain* _other);
-	void updateClashes();
 	UInt getClashes (UInt resIndex) {return itsResidues[resIndex]->getClashes() + itsResidues[resIndex]->getIntraClashes();}
 	void listConnectivity(UInt _resIndex) {return itsResidues[_resIndex]->listConnectivity();}
 private:
@@ -210,26 +205,11 @@ public:
 	int setPsi(const UInt _indexInChain, double _psi);
 	int setDihedral(const UInt _resIndex, double _dihedral, UInt _angleType, UInt _direction);
 	double getDielectric(UInt _resIndex, UInt _atomIndex) {return itsResidues[_resIndex]->itsAtoms[_atomIndex]->getDielectric();}
-	double intraEnergy();
-	void updateEnergy();
-	void updateEnergy(chain* _other);
 	void updateMovedDependence(UInt _EorC);
 	void updateMovedDependence(chain* _other, UInt _EorC);
 	double getEnergy();
-	void polarizability();
-	void polarizability(chain* _other);
-	void calculateDielectrics();
-	double interEnergy(chain* _other);
-	double getInterEnergy(const UInt _res1, chain* _other, const UInt _res2);
-	double getInterEnergy(const UInt _residue1, const UInt _atom1, chain* _other, const UInt _residue2, const UInt _atom2);
-	double getSelfEnergy(UInt _residueIndex);
 
-	double getPositionIntraEnergy(vector<int> _position);
-	double getPositionInterEnergy(vector<int> _position, chain* _other);
-	double getPositionIntraSoluteEnergy(vector<int> _position);
-	double getPositionIntraSoluteEnergy(UInt _residueIndex);
 	double getPositionInterSoluteEnergy(vector<int> _position, chain* _other);
-	double getSoluteEnergy(UInt resIndex, UInt atomIndex, chain* _other, UInt otherResIndex, UInt otherAtomIndex);
 
 	double getVolume(UInt _method);
 

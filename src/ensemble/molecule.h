@@ -35,7 +35,6 @@ public:
 	virtual void rotate(const UInt _index, const axis _axis, const double _theta) = 0;
 	virtual void rotate(const UInt _index, const point& _point, const dblVec& _R_axis, const double _theta) = 0;
 
-	virtual double getPositionEnergy(vector <int> _position) = 0;
 	virtual vector<int> getLastModification() = 0;	
 	virtual vector<int> chooseNextTargetPosition(ran& _ran) = 0;
 	virtual UInt chooseNextMutationIdentity(ran& _ran, vector <int> _position) = 0;

@@ -39,7 +39,6 @@ public:
 
         molecule * getMoleculePointer(UInt _index);
         UInt getNumMolecules(){return itsMolecules.size();}
-	double getPositionEnergy(vector <int> _position);
 	vector <int> getLastModification();
 	vector <int> chooseNextTargetPosition(ran& _ran);
 	UInt chooseNextMutationIdentity(ran& _ran, vector <int> _position);

@@ -1815,149 +1815,6 @@ double chain::getVolume(UInt _method)
 	return itsVolume;
 }
 
-double chain::getInterEnergy(const UInt _residue1, const UInt _atom1, chain* _other, const UInt _residue2, const UInt _atom2)
-{
-	if (_residue1 >=0 && _residue1 < itsResidues.size() && _residue2 >=0 && _residue2 < _other->itsResidues.size())
-	{
-		return itsResidues[_residue1]->getIntraEnergy(_atom1, _other->itsResidues[_residue2], _atom2);
-	}
-	else
-	{
-		cout << "ERROR in chain::getIntraEnergy(....) *residue index out of range." << endl;
-		exit(1);
-	}
-}
-
-double chain::getInterEnergy(const UInt _residue1, chain* _other, const UInt _residue2)
-{
-	if (_residue1 >= 0 && _residue1 < itsResidues.size() && _residue2 >= 0 && _residue2 < _other->itsResidues.size())
-	{
-		return itsResidues[_residue1]->interEnergy(_other->itsResidues[_residue2]);
-	}
-	else
-	{
-		cout << "ERROR in chain:getIntraEnergy(...)  residue index out of range." << endl;
-		exit(1);
-	}
-}
-
-double chain::intraEnergy()
-{	double intraEnergy = 0.0;
-	//cout << "chain::intraEnergy";
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{	// choose not to include residue internal energy
-		//cout << endl << "res " << i << "  ";
-		double tempE = itsResidues[i]->intraEnergy();
-		intraEnergy += tempE;
-		//cout << tempE << " ";
-		//double rotE = rotamerEnergy(i);
-		//intraEnergy += rotE;
-		//cout << rotE << " ";
-		double interE = 0.0;
-		for(UInt j=i+1; j<itsResidues.size(); j++)
-		{	interE += itsResidues[i]->interEnergy(itsResidues[j]);
-		}
-		intraEnergy += interE;
-		//cout << interE << " ";
-	}
-	//cout << " done!" << endl << "intraEnergy being returned is : ";
-	// cout << intraEnergy << endl;
-	return intraEnergy;
-}
-
-void chain::updateEnergy()
-{
-	bool resI, resJ;
-	double resEnergy;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(0);
-		for(UInt j=i+1; j<itsResidues.size(); j++)
-		{
-			resJ =  itsResidues[j]->getMoved(0);
-			if (resI || resJ){
-				resEnergy = itsResidues[i]->interSoluteEnergy(itsResidues[j]), resEnergy /= 2;
-				if(resI){itsResidues[i]->sumEnergy(resEnergy);}
-				if(resJ){itsResidues[j]->sumEnergy(resEnergy);}
-			}
-		}
-		if(resI){
-			resEnergy = itsResidues[i]->intraSoluteEnergy();
-			itsResidues[i]->sumEnergy(resEnergy);
-		}
-	}
-}
-
-void chain::updateEnergy(chain* _other)
-{
-	bool resI, resJ;
-	double resEnergy;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(0);
-		for(UInt j=0; j<_other->itsResidues.size(); j++)
-		{
-			resJ = _other->itsResidues[j]->getMoved(0);
-			if (resI || resJ){
-				resEnergy = itsResidues[i]->interSoluteEnergy(_other->itsResidues[j]), resEnergy /= 2;
-				if(resI){itsResidues[i]->sumEnergy(resEnergy);}
-				if(resJ){_other->itsResidues[j]->sumEnergy(resEnergy);}
-			}
-		}
-	}
-}
-double chain::getSoluteEnergy(UInt resIndex, UInt atomIndex, chain* _other, UInt otherResIndex, UInt otherAtomIndex)
-{
-	double E = itsResidues[resIndex]->getSoluteEnergy(atomIndex, _other->itsResidues[otherResIndex], otherAtomIndex);
-	return E;
-}
-
-
-void chain::polarizability()
-{
-	bool resI, resJ;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(0);
-		for(UInt j=i+1; j<itsResidues.size(); j++)
-		{
-			resJ = itsResidues[j]->getMoved(0);
-			if (resI || resJ){
-				itsResidues[i]->polarizability(itsResidues[j]);
-			}
-		}
-		if (resI){
-			itsResidues[i]->polarizability();
-		}
-	}
-}
-
-void chain::polarizability(chain* _other)
-{
-	bool resI, resJ;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(0);
-		for(UInt j=0; j<_other->itsResidues.size(); j++)
-		{
-			resJ = _other->itsResidues[j]->getMoved(0);
-			if (resI || resJ){
-				itsResidues[i]->polarizability(_other->itsResidues[j]);
-			}
-		}
-	}
-}
-
-void chain::calculateDielectrics()
-{
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		if (itsResidues[i]->getMoved(0)){
-			itsResidues[i]->calculateDielectrics();
-		}
-	}
-}
-
 void chain::updateMovedDependence(UInt _EorC)
 {
 	for(UInt i=0; i<itsResidues.size(); i++)
@@ -2004,51 +1861,6 @@ double chain::getEnergy()
 }
 
 
-void chain::updateClashes()
-{
-	bool resI, resJ;
-	UInt clashes;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(1);
-		for(UInt j=i+1; j<itsResidues.size(); j++)
-		{
-			resJ =  itsResidues[j]->getMoved(1);
-			if (resI || resJ){
-				// Record the full pair count against each partner.  Halving it
-				// here truncated odd counts and, when only one partner had
-				// moved, dropped the other half outright.
-				clashes = itsResidues[i]->getNumHardClashes(itsResidues[j]);
-				if(resI){itsResidues[i]->sumClashes(clashes);}
-				if(resJ){itsResidues[j]->sumClashes(clashes);}
-			}
-		}
-		if(resI){
-			clashes = itsResidues[i]->getNumHardClashes();
-			itsResidues[i]->sumIntraClashes(clashes);
-		}
-	}
-}
-
-void chain::updateClashes(chain* _other)
-{
-	bool resI, resJ;
-	UInt clashes;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(1);
-		for(UInt j=0; j<_other->itsResidues.size(); j++)
-		{
-			resJ = _other->itsResidues[j]->getMoved(1);
-			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardClashes(_other->itsResidues[j]);
-				if(resI){itsResidues[i]->sumClashes(clashes);}
-				if(resJ){_other->itsResidues[j]->sumClashes(clashes);}
-			}
-		}
-	}
-}
-
 // Sum of per-residue participation counts.  Every inter-residue pair appears
 // twice here, once per partner, and cross-chain pairs contribute only their
 // near half to this chain.  The halving is therefore done once at the protein
@@ -2074,44 +1886,6 @@ UInt chain::getIntraClashes()
 }
 
 
-void chain::updateBackboneClashes()
-{
-	bool resI, resJ;
-	UInt clashes;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(2);
-		for(UInt j=i+1; j<itsResidues.size(); j++)
-		{
-			resJ =  itsResidues[j]->getMoved(2);
-			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardBackboneClashes(itsResidues[j]);
-				if(resI){itsResidues[i]->sumBackboneClashes(clashes);}
-				if(resJ){itsResidues[j]->sumBackboneClashes(clashes);}
-			}
-		}
-	}
-}
-
-void chain::updateBackboneClashes(chain* _other)
-{
-	bool resI, resJ;
-	UInt clashes;
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-		resI = itsResidues[i]->getMoved(2);
-		for(UInt j=0; j<_other->itsResidues.size(); j++)
-		{
-			resJ = _other->itsResidues[j]->getMoved(2);
-			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardBackboneClashes(_other->itsResidues[j]);
-				if(resI){itsResidues[i]->sumBackboneClashes(clashes);}
-				if(resJ){_other->itsResidues[j]->sumBackboneClashes(clashes);}
-			}
-		}
-	}
-}
-
 UInt chain::getBackboneClashes()
 {
 	UInt clashes = 0;
@@ -2120,46 +1894,6 @@ UInt chain::getBackboneClashes()
 		clashes += itsResidues[i]->getBackboneClashes();
 	}
 	return clashes;
-}
-
-double chain::getPositionIntraEnergy(vector <int> _position)
-{
-	double intraEnergy = 0.0;
-	intraEnergy += itsResidues[_position[2]]->intraEnergy();
-	//intraEnergy += rotamerEnergy(_position[2]);
-	//cout << " ... at residue level:  calculating intraenergy at position " << _position[0] << " " << _position[1] << " " << _position[2];
-	for (UInt i = 0; i < itsResidues.size(); i++)
-	{
-		if ( (int)i != _position[2]) intraEnergy += itsResidues[_position[2]]->interEnergy(itsResidues[i]);
-	}
-	//cout << " " << intraEnergy << " i " << itsResidues[_position[2]]->intraEnergy() << " r " << rotamerEnergy(_position[2]) << endl;
-	return intraEnergy;
-}
-
-double chain::interEnergy(chain* _other)
-{	double interEnergy = 0.0;
-	//cout << "chain::interEnergy";
-	for(UInt i=0; i<itsResidues.size(); i++)
-	{
-	//	cout << "res " << i << "  ";
-		for(UInt j=0; j<_other->itsResidues.size(); j++)
-		{	interEnergy += itsResidues[i]->interEnergy(_other->itsResidues[j]);
-		}
-	}
-	//cout << " done!" << endl;
-	return interEnergy;
-}
-
-double chain::getPositionInterEnergy(vector <int> _position, chain* _other)
-{
-	double interEnergy = 0.0;
-	for (UInt i = 0; i < _other->itsResidues.size(); i++)
-	{
-		interEnergy+= itsResidues[_position[2]]->interEnergy(_other->itsResidues[i]);
-		//cout << interEnergy << endl;
-	}
-
-	return interEnergy;
 }
 
 double chain::rotamerEnergy()
@@ -2388,27 +2122,6 @@ void chain::symmetryLinkResidueAtoB(UInt _masterResIndex, UInt _slaveResIndex)
     }
 }
 
-double chain::getSelfEnergy(UInt _residueIndex)
-{
-    if (_residueIndex >=0 && _residueIndex < itsResidues.size())
-    {
-        double selfEnergy = 0.0;
-        for (UInt i = 0; i < itsResidues.size(); i++)
-        {
-            //cout << "Residue " << _residueIndex << " with " << i << endl;
-            selfEnergy += itsResidues[_residueIndex]->getSelfEnergy(itsResidues[i]);
-        }
-        return selfEnergy;
-    }
-    else
-    {
-        cout << "ERROR in chain::getSelfEnergy(...) residue index out of range" << endl;
-        exit(1);
-    }
-    return -1;
-
-}
-
 // surface area operations...
 
 void chain::initializeSpherePoints()
@@ -2548,29 +2261,6 @@ residue* chain::superimposeGLY(const UInt _residue)
 		cout << "ERROR in chain::superimposeGLY ... residue index out of range." << endl;
 		exit(1);
 	}
-}
-
-double chain::calculateHCA_O_hBondEnergy(chain* _other)
-{
-	double hBondEnergy = 0.0;
-	for (UInt donor = 0; donor < itsResidues.size(); donor ++)
-	{
-		if (itsResidues[donor]->getType() == "GLY")
-		{
-			residue* tempGLY = itsResidues[donor]->superimposeGLY();
-			for (UInt acceptor = 0; acceptor < _other->itsResidues.size(); acceptor ++)
-			{
-				if( itsResidues[donor] != _other->itsResidues[acceptor])
-				{
-					double temphBondEnergy = tempGLY->calculateHCA_O_hBondEnergy(_other->itsResidues[acceptor]);
-					//if (temphBondEnergy < 0) cout << "found good hbond " << donor << " " << acceptor << " " << temphBondEnergy<< endl;
-					hBondEnergy += temphBondEnergy;
-				}
-			}
-			delete tempGLY;
-		}
-	}
-	return hBondEnergy;
 }
 
 dblVec chain::getBackBoneCentroid()

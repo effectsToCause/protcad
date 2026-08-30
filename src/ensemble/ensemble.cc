@@ -289,17 +289,6 @@ vector <int> ensemble::getLastModification()
 	return position;
 }
 
-double ensemble::getPositionEnergy(vector<int> _position)
-{
-	if (_position.size() == 3) // if position contains molecule id, chain id and res id
-	{
-		return itsMolecules[_position[0]]->getPositionEnergy(_position);	
-
-	}
-	else cout << "ERROR in ensemble::getPositionEnergy ... position variable incorrectly specified." << endl;
-	return 0.0;
-}
-
 double ensemble::energy()
 {	itsEnergy = 0.0;
 	// This is the PMF energy component + the rotamer energy component
