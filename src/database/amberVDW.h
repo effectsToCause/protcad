@@ -78,6 +78,7 @@ public:
 	
 private:
 	void buildDataBase();
+	void applyForceFieldParams();
 	// StrVec is intended non const reference
 	void convertToDataElements(const StrVec& _parsedStrings);
 

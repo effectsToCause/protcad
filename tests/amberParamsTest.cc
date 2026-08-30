@@ -9,6 +9,7 @@
 // error in the table protcad has been using.
 
 #include "amberParams.h"
+#include "amberVDW.h"
 #include "generalio.h"
 #include <iostream>
 #include <fstream>
@@ -155,8 +156,39 @@ int main()
              << ", not in ff14SB " << absent << endl;
     }
 
-    const vector<string>& w = ff.warnings();
-    if (!w.empty())
+    // ---------------------------------------------------------------
+    // amberVDW now overlays ff14SB onto its own table.  The overlay must fix
+    // the polar hydrogens without disturbing row order, because indices are
+    // cached across the ensemble code and water is indexed by a literal.
+    // ---------------------------------------------------------------
+    cout << "\n[amberVDW overlay]" << endl;
+    {
+        amberVDW v;
+        int iHO = v.getIndexFromNameString("HO");
+        int iH  = v.getIndexFromNameString("H");
+        int iN  = v.getIndexFromNameString("N");
+        check(iHO >= 0 && iH >= 0 && iN >= 0, "polar H types still resolve");
+        check(v.getRadius(iHO) == 0.0 && v.getEpsilon(iHO) == 0.0,
+              "HO radius and epsilon now zero");
+        check(fabs(v.getRadius(iH) - 0.6) < 1e-6, "H radius now 0.6");
+        check(v.getVolume(iHO) == 0.0, "HO displaces no solvent");
+        check(fabs(v.getRadius(iN) - 1.8240) < 1e-6, "N unchanged by overlay");
+
+        // getWaterEnergy() indexes water as literal 54.  If the overlay ever
+        // reorders rows this is the check that catches it.
+        check(v.getIndexFromNameString("OW") == 54, "water still at index 54");
+
+        // Volume must satisfy the file's own 4.18*R^3 relation everywhere.
+        bool volOk = true;
+        for (int i = 0; i < 54; ++i)
+        {
+            double r = v.getRadius(i);
+            if (fabs(v.getVolume(i) - 4.18 * r * r * r) > 1e-3) volOk = false;
+        }
+        check(volOk, "volume consistent with 4.18*R^3");
+    }
+
+    const vector<string>& w = ff.warnings();    if (!w.empty())
     {
         cout << "\n[warnings]" << endl;
         for (size_t i = 0; i < w.size(); ++i) cout << "  " << w[i] << endl;

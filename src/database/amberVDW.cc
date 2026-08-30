@@ -1,4 +1,6 @@
 #include "amberVDW.h"
+#include "amberParams.h"
+#include <cstdlib>
 
 double amberVDW::itsScaleFactor = 1.0;
 double amberVDW::itsRadiusScaleFactor = 1.0;
@@ -220,6 +222,57 @@ void amberVDW::buildDataBase()
 
 	inFile.close();
 	inFile.clear();
+
+	applyForceFieldParams();
+}
+
+// amberVDW.frc is a hand transcription of Amber's nonbonded parameters, and it
+// got three of the polar hydrogens wrong: H and HS are too large, and HO was
+// given a radius and a well depth at all when ff14SB gives it neither.  A
+// hydroxyl hydrogen with R* = 1.1 has a repulsive wall sitting exactly where a
+// hydrogen bond has to close, which is worth several kcal/mol per bond and is
+// systematically anti-secondary-structure.
+//
+// Rather than patch the three rows, take the physical parameters from the
+// distributed ff14SB files for every type that appears in them.  Types that do
+// not (water, ions, nucleic acid, anything GAFF) keep whatever amberVDW.frc
+// says, since ff14SB has no opinion about them.
+//
+// Two things are deliberately preserved:
+//   - the row order of amberVDW.frc, because indices from
+//     getIndexFromNameString are cached all over the ensemble code and
+//     getWaterEnergy indexes water by a hardcoded literal;
+//   - the polarizability flag column, which is protcad's own and has no Amber
+//     counterpart.
+//
+// Shell volume is recomputed as 4.18*R*^3, which is the relation the file's own
+// volume column already satisfies for every row, so this is a no-op except
+// where the radius itself changed.  It matters for HO: the solvation model was
+// giving a zero-radius hydrogen 5.6 A^3 of displaced solvent.
+//
+// Set PROTCAD_VDW_LEGACY=1 to keep the old table, so the effect of the fix can
+// be measured rather than silently absorbed.
+void amberVDW::applyForceFieldParams()
+{
+	const char* legacy = getenv("PROTCAD_VDW_LEGACY");
+	if (legacy && legacy[0] == '1')
+	{
+		cout << "amberVDW: PROTCAD_VDW_LEGACY=1, using data/amberVDW.frc as written" << endl;
+		return;
+	}
+
+	amberParams ff;
+	ff.loadFF14SB();
+
+	for (UInt i = 0; i < amberAtomTypeNames.size(); i++)
+	{
+		if (!ff.hasVdw(amberAtomTypeNames[i])) continue;
+		const amberVdwParam& p = ff.vdw(amberAtomTypeNames[i]);
+		R_ref[i] = p.radius;
+		EPS[i] = p.epsilon;
+		if (p.polarizability > 0.0) Pol_ref[i] = p.polarizability;
+		Vol_ref[i] = 4.18 * p.radius * p.radius * p.radius;
+	}
 }
 
 // where specific information about parsed data is intepreted
