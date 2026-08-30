@@ -314,6 +314,40 @@ int clashComputeAtoms(energyContext* ctx,
                       const double* x, const double* y, const double* z,
                       int* clashCountOut, int* perAtomOut);
 
+// ---------------------------------------------------------------------------
+// Residency
+// ---------------------------------------------------------------------------
+//
+// The context owns a canonical copy of the coordinates on the device.  A
+// caller may upload once, mutate them in place across many evaluations, and
+// read them back only when it actually needs them on the host.  This is what a
+// minimisation loop wants: the structure stays resident and the host sees only
+// scalars.
+//
+// The *Resident entry points below evaluate whatever is currently in that
+// device state.  They are exactly equivalent to their host-array counterparts
+// called with the same coordinates; the host-array forms are now thin wrappers
+// that upload and then delegate.
+
+// Upload host coordinates into the resident device state.
+int energySetCoords(energyContext* ctx,
+                    const double* x, const double* y, const double* z);
+
+// Read the resident coordinates back.  Any of x, y, z may be null.
+int energyGetCoords(energyContext* ctx, double* x, double* y, double* z);
+
+// Save / restore the resident coordinates entirely on the device, for cheap
+// accept/reject in a Monte Carlo loop.  No host transfer is involved.
+int energySnapshot(energyContext* ctx);
+int energyRestore(energyContext* ctx);
+
+// Evaluate using the resident coordinates.  perAtomOut, breakdown and the
+// per-atom arrays may be null.
+int energyComputeResident(energyContext* ctx, double* totalOut,
+                          energyBreakdown* breakdown, double* perAtomOut);
+int clashComputeResident(energyContext* ctx, int* clashCountOut, int* perAtomOut);
+int shellComputeResident(energyContext* ctx, double* dielectricOut, double* watersOut);
+
 // Human-readable description of the last error, or null if none.
 const char* energyLastError(energyContext* ctx);
 
