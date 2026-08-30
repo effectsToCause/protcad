@@ -1591,7 +1591,7 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt clashes, clashesStart, chainNum = _activeChains.size(), plateau = 1000;
+	UInt chainNum = _activeChains.size(), plateau = 1000;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
 	//double rotX, rotY, rotZ, transX, transY, transZ;
 	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
@@ -1609,7 +1609,15 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 					if (randres == _frozenResidues[i]) {skip = true; break;}
 				}
 			} while (skip);
-		clashesStart = getNumClashesCU(); resnum = getNumResidues(randchain); nobetter++;
+		resnum = getNumResidues(randchain); nobetter++;
+		// No clash pre-filter.  The discrete clash count was a CPU-era device for
+		// skipping an expensive energy evaluation after an obviously bad move.  On
+		// the GPU it does not pay for itself, and worse, "clashes <= clashesStart"
+		// is a hard veto that rejects any move adding a single clash regardless of
+		// energy -- overriding the Boltzmann criterion that is supposed to own that
+		// decision.  Since energy radii became AMBER, clash and vdW read the same
+		// radius array, so the gate is a step-function shadow of the r^-12 term the
+		// energy already computes more sharply and smoothly.  Let energy decide.
 		backboneTest = false, sidechainTest = false, cofactorTest = false, energyTest = false, revert = true;
 		
 		/*if (isCofactor(randchain, randres))
@@ -1635,10 +1643,7 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
 				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
 				setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-				clashes = getNumClashesCU();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
+				energyTest = true; revert = false;
 			}
 			//--Sidechain conformation trial--------------------------------------------------------
 			else{
@@ -1646,10 +1651,7 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 				currentSidechainConf = getSidechainDihedrals(randchain, randres);
 				newSidechainConf = randContinuousSidechainConformation(randchain, randres);
 				setSidechainDihedralAngles(randchain, randres, newSidechainConf);
-				clashes = getNumClashesCU();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
+				energyTest = true; revert = false;
 			}
 		//}
 		//--Energy-Test-------------------------------------------------------------------------
@@ -1691,7 +1693,7 @@ void protein::protMinCU(bool _backbone)
 
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt clashes, clashesStart, chainNum = getNumChains(), plateau = 1000;
+	UInt chainNum = getNumChains(), plateau = 1000;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
 	//double rotX, rotY, rotZ, transX, transY, transZ;
 	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
@@ -1702,7 +1704,15 @@ void protein::protMinCU(bool _backbone)
 		//--choose random residue not frozen of active chains
 		randchain = rand() % chainNum;
 		randres = rand() % getNumResidues(randchain);
-		clashesStart = getNumClashesCU(); resnum = getNumResidues(randchain); nobetter++;
+		resnum = getNumResidues(randchain); nobetter++;
+		// No clash pre-filter.  The discrete clash count was a CPU-era device for
+		// skipping an expensive energy evaluation after an obviously bad move.  On
+		// the GPU it does not pay for itself, and worse, "clashes <= clashesStart"
+		// is a hard veto that rejects any move adding a single clash regardless of
+		// energy -- overriding the Boltzmann criterion that is supposed to own that
+		// decision.  Since energy radii became AMBER, clash and vdW read the same
+		// radius array, so the gate is a step-function shadow of the r^-12 term the
+		// energy already computes more sharply and smoothly.  Let energy decide.
 		backboneTest = false, sidechainTest = false, cofactorTest = false, energyTest = false, revert = true;
 		
 		/*if (isCofactor(randchain, randres))
@@ -1728,10 +1738,7 @@ void protein::protMinCU(bool _backbone)
 				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
 				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
 				setDihedral(randchain,randres,backboneAngles[0],0,0); setDihedral(randchain,randres,backboneAngles[1],1,0);
-				clashes = getNumClashesCU();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
+				energyTest = true; revert = false;
 			}
 			//--Sidechain conformation trial--------------------------------------------------------
 			else{
@@ -1739,10 +1746,7 @@ void protein::protMinCU(bool _backbone)
 				currentSidechainConf = getSidechainDihedrals(randchain, randres);
 				newSidechainConf = randContinuousSidechainConformation(randchain, randres);
 				setSidechainDihedralAngles(randchain, randres, newSidechainConf);
-				clashes = getNumClashesCU();
-				if (clashes <= clashesStart){
-					energyTest = true; revert = false;
-				}
+				energyTest = true; revert = false;
 			}
 		//}
 		//--Energy-Test-------------------------------------------------------------------------
