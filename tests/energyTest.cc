@@ -196,7 +196,7 @@ static void referenceEnergy(const System& s, const energyParams& p,
         if (s.silent[i]) continue;
         double w = sh[i].waters;
         if (w <= 0) continue;
-        double wp = p.bornNormalize ? (w / sh[i].capacity) : w;
+        double wp = p.bornNormalize ? (w / sh[i].capacity) * p.bornReferenceCapacity : w;
         spT += p.eSolvationFactor * (-(kc*0.5) * s.chg[i]*s.chg[i]
                 / ((s.rad[i] + p.waterRadius) * sh[i].eps)) * wp;
         snT += p.hSolvationFactor * (-(sqrt(s.eps[i]) * sqrt(p.waterEpsilon))) * w;
@@ -221,7 +221,10 @@ static int referenceClash(const System& s, const energyParams& p)
             if (p.clash == CLASH_INSCRIBED_CUBE) {
                 double c = rsum * 0.7071067811865476;
                 hit = fabs(dx) < c && fabs(dy) < c && fabs(dz) < c;
-            } else hit = (dx*dx+dy*dy+dz*dz) < rsum*rsum;
+            } else {
+                double t = rsum * p.clashTolerance;
+                hit = (dx*dx+dy*dy+dz*dz) < t*t;
+            }
             if (!hit) continue;
             if (excludedH(s, i, j, p.exclusionResidueSpan)) continue;
             ++n;
@@ -321,8 +324,8 @@ int main()
     energyParams cm = def; cm.dielectric = DIELECTRIC_CLAUSIUS_MOSSOTTI;
     runCase(1000, cm, "clausius-mossotti", tol);
 
-    energyParams bn = def; bn.bornNormalize = 1;
-    runCase(1000, bn, "born-normalized", tol);
+    energyParams bn = def; bn.bornNormalize = 0;
+    runCase(1000, bn, "born-raw-count", tol);
 
     printf(failures ? "RESULT: %d FAILURES\n" : "RESULT: all checks passed (%d failures)\n",
            failures);

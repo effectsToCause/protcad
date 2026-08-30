@@ -1222,7 +1222,18 @@ void protein::buildEnergyContext()
 			lastChain = ci; lastRes = rin;
 		}
 		resNumAtoms.back()++;
-		hrad.push_back(pRes->getVDWRadius(ai));
+		// Atom radius source.  getRadius() is the element-level table
+		// (atom.cc dataBase); getVDWRadius() is the AMBER energy-type table
+		// used by the vdW term itself.  For heavy atoms the two agree to
+		// within 0.01 A, but they differ sharply for hydrogen: the element
+		// table assigns every H a flat 1.090 A while AMBER resolves H by
+		// chemical environment over 1.00-1.49 A.  That single difference
+		// changes the hard-clash count by about 1.8x.  The element table is
+		// what the shipped clash calibration was built against, so it is kept
+		// here; switching to getVDWRadius() would make the clash criterion and
+		// the vdW term agree on atom size, but requires recalibrating
+		// energyParams::clashTolerance.
+		hrad.push_back(pRes->getRadius(ai));
 		heps.push_back(pRes->getVDWEpsilon(ai));
 		hchg.push_back(pRes->getCharge(ai));
 		hres.push_back(int(resPtr.size()) - 1);
@@ -1898,12 +1909,15 @@ void protein::updateBackboneClashes()
 UInt protein::getNumHardBackboneClashes()
 {
 	updateBackboneClashes();
-	UInt clashes = 0;
+	// As in getNumHardClashes(): each pair is recorded once per partner, so the
+	// participation sum is halved once, globally, rather than per pair.  There
+	// is no intra-residue backbone term.
+	UInt participation = 0;
 	for(UInt i=0; i<itsChains.size(); i++)
 	{
-		clashes += itsChains[i]->getBackboneClashes();
+		participation += itsChains[i]->getBackboneClashes();
 	}
-	return clashes;
+	return participation / 2;
 }
 
 void protein::updateClashes()
@@ -1923,12 +1937,16 @@ void protein::updateClashes()
 UInt protein::getNumHardClashes()
 {
 	updateClashes();
-	UInt clashes = 0;
+	// Per-residue counts record each inter-residue pair once per partner, so the
+	// participation sum is exactly twice the number of distinct clashing pairs.
+	// Intra-residue pairs are recorded once and are added after the halving.
+	UInt participation = 0, intra = 0;
 	for(UInt i=0; i<itsChains.size(); i++)
 	{
-		clashes += itsChains[i]->getClashes();
+		participation += itsChains[i]->getClashes();
+		intra += itsChains[i]->getIntraClashes();
 	}
-	return clashes;
+	return participation / 2 + intra;
 }
 
 UInt protein::getNumHardClashes(UInt chainIndex, UInt resIndex)

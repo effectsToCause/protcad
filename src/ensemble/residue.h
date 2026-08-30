@@ -350,9 +350,19 @@ public:
 	void clearEnvironment();
 	bool getMoved(UInt EorC); //Energy 0 or clashes 1
 	bool getCheckMovedDependence(UInt _EorC);
+	// clashes counts the inter-residue clashing atom pairs this residue takes
+	// part in, so a pair is recorded once by each partner.  intraClashes counts
+	// clashing pairs wholly inside this residue and is recorded once.  A whole-
+	// structure total is therefore sum(clashes)/2 + sum(intraClashes); see
+	// protein::getNumHardClashes().  Keeping the two separate is what allows the
+	// total to be exact -- the previous scheme halved each pair count before
+	// storing it, which truncated odd counts and lost a pair.
 	void setClashes (UInt _clashes);
 	void sumClashes (UInt _clashes);
 	UInt getClashes() const {return clashes;}
+	void setIntraClashes (UInt _clashes) {intraClashes = _clashes;}
+	void sumIntraClashes (UInt _clashes) {intraClashes += _clashes;}
+	UInt getIntraClashes() const {return intraClashes;}
 	void setBackboneClashes (UInt _clashes);
 	void sumBackboneClashes (UInt _clashes);
 	UInt getBackboneClashes() const {return clashesB;}
@@ -409,6 +419,7 @@ private:
 	bool dependentMoveC = false;
 	bool dependentMoveB = false;
 	UInt clashes = 0;
+	UInt intraClashes = 0;
 	UInt clashesB = 0;
 	double Energy = 0.0;
 	UInt RPT = 0;

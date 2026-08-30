@@ -163,9 +163,10 @@ public:
 	void updateBackboneClashes(chain* _other);
 	void updateBackboneClashes();
 	UInt getClashes();
+	UInt getIntraClashes();
 	void updateClashes(chain* _other);
 	void updateClashes();
-	UInt getClashes (UInt resIndex) {return itsResidues[resIndex]->getClashes();}
+	UInt getClashes (UInt resIndex) {return itsResidues[resIndex]->getClashes() + itsResidues[resIndex]->getIntraClashes();}
 	void listConnectivity(UInt _resIndex) {return itsResidues[_resIndex]->listConnectivity();}
 private:
 	int chooseTargetResidue(ran& _ran);

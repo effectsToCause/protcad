@@ -2004,14 +2004,17 @@ void chain::updateClashes()
 		{
 			resJ =  itsResidues[j]->getMoved(1);
 			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardClashes(itsResidues[j]), clashes /= 2;
+				// Record the full pair count against each partner.  Halving it
+				// here truncated odd counts and, when only one partner had
+				// moved, dropped the other half outright.
+				clashes = itsResidues[i]->getNumHardClashes(itsResidues[j]);
 				if(resI){itsResidues[i]->sumClashes(clashes);}
 				if(resJ){itsResidues[j]->sumClashes(clashes);}
 			}
 		}
 		if(resI){
 			clashes = itsResidues[i]->getNumHardClashes();
-			itsResidues[i]->sumClashes(clashes);
+			itsResidues[i]->sumIntraClashes(clashes);
 		}
 	}
 }
@@ -2027,7 +2030,7 @@ void chain::updateClashes(chain* _other)
 		{
 			resJ = _other->itsResidues[j]->getMoved(1);
 			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardClashes(_other->itsResidues[j]), clashes /= 2;
+				clashes = itsResidues[i]->getNumHardClashes(_other->itsResidues[j]);
 				if(resI){itsResidues[i]->sumClashes(clashes);}
 				if(resJ){_other->itsResidues[j]->sumClashes(clashes);}
 			}
@@ -2035,12 +2038,26 @@ void chain::updateClashes(chain* _other)
 	}
 }
 
+// Sum of per-residue participation counts.  Every inter-residue pair appears
+// twice here, once per partner, and cross-chain pairs contribute only their
+// near half to this chain.  The halving is therefore done once at the protein
+// level, where the sum is guaranteed even, rather than per chain or per pair.
 UInt chain::getClashes()
 {
 	UInt clashes = 0;
 	for(UInt i=0; i<itsResidues.size(); i++)
 	{
 		clashes += itsResidues[i]->getClashes();
+	}
+	return clashes;
+}
+
+UInt chain::getIntraClashes()
+{
+	UInt clashes = 0;
+	for(UInt i=0; i<itsResidues.size(); i++)
+	{
+		clashes += itsResidues[i]->getIntraClashes();
 	}
 	return clashes;
 }
@@ -2057,7 +2074,7 @@ void chain::updateBackboneClashes()
 		{
 			resJ =  itsResidues[j]->getMoved(2);
 			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardBackboneClashes(itsResidues[j]), clashes /= 2;
+				clashes = itsResidues[i]->getNumHardBackboneClashes(itsResidues[j]);
 				if(resI){itsResidues[i]->sumBackboneClashes(clashes);}
 				if(resJ){itsResidues[j]->sumBackboneClashes(clashes);}
 			}
@@ -2076,7 +2093,7 @@ void chain::updateBackboneClashes(chain* _other)
 		{
 			resJ = _other->itsResidues[j]->getMoved(2);
 			if (resI || resJ){
-				clashes = itsResidues[i]->getNumHardBackboneClashes(_other->itsResidues[j]), clashes /= 2;
+				clashes = itsResidues[i]->getNumHardBackboneClashes(_other->itsResidues[j]);
 				if(resI){itsResidues[i]->sumBackboneClashes(clashes);}
 				if(resJ){_other->itsResidues[j]->sumBackboneClashes(clashes);}
 			}
