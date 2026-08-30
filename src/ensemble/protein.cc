@@ -1182,223 +1182,216 @@ double protein::getBackboneHBondEnergy(UInt donorChainIndex, UInt donorResIndex,
 
 #ifdef __CUDA__
 
-void protein::loadDeviceMemEnergy()
+// Build the persistent GPU context: static per-atom properties plus the
+// bonded-exclusion lists.
+//
+// The original built a dense N*(N-1)/2 bonding matrix with a host loop over
+// every atom pair.  For a 3000-atom protein that is 4.5M isSeparatedBy...
+// calls and 54 MB of device memory, and it grew quadratically.  Bonded
+// exclusions never reach beyond an adjacent residue, so restricting the search
+// to a residue window makes this O(N) with a small constant while producing an
+// identical exclusion set.
+void protein::setEnergyParamsOverride(const energyParams& _p)
 {
-	// Allocate host (CPU) memory for arrays to be passed to device (GPU)
-	int N = getNumAtoms();
-	int bondingSize = N * (N - 1) / 2;
-	cudaMallocHost(&x, N * sizeof(double));
-	cudaMallocHost(&y, N * sizeof(double));
-	cudaMallocHost(&z, N * sizeof(double));
-	cudaMallocHost(&rad, N * sizeof(double));
-	cudaMallocHost(&eps, N * sizeof(double));
-	cudaMallocHost(&chg, N * sizeof(double));
-	cudaMallocHost(&vol, N * sizeof(double));
-	cudaMallocHost(&bon, bondingSize * sizeof(int));
+	itsEnergyParams = _p; itsEnergyParamsSet = true;
+}
 
-	// Load arrays with xyz coords, vdw radius, epsilon and charge per atom, and also bonding flag per atom pair 
-	atomIterator aIter1(this); atom* pAtom1; UInt Ncounter = 0; UInt bonCounter = 0; double E=0;
-    for (; !(aIter1.last()); aIter1++)
-    {
-		// Load xyz coords, vdw rad, epsilon and charge
-		pAtom1 = aIter1.getAtomPointer(); 
-        dblVec coords = pAtom1->getCoords(); x[Ncounter] = coords[0]; y[Ncounter] = coords[1]; z[Ncounter] = coords[2];
-		residue* res1 = aIter1.getResiduePointer();
-		rad[Ncounter] = res1->getVDWRadius(aIter1.getAtomIndex()); eps[Ncounter] = res1->getVDWEpsilon(aIter1.getAtomIndex()); 
-		chg[Ncounter] = res1->getCharge(aIter1.getAtomIndex()); vol[Ncounter] = 0.0;
+void protein::buildEnergyContext()
+{
+	if (itsEnergyContext) {return;}
 
-		// Load bonding integer per non-redundant pair of atoms (1 for bonded within three bonds, 0 for not bonded)
-		atomIterator aIter2(aIter1); aIter2++;
-		for (; !(aIter2.last()); aIter2++)
+	// Enumerate atoms with the same atomIterator used to upload coordinates.
+	// Deriving the topology from a separate nested walk over chains/residues
+	// risks a different order or count than the coordinate pass, which would
+	// silently pair every atom with another atom's radius and exclusions.
+	vector<residue*> resPtr; vector<int> resChain, resFirstAtom, resNumAtoms;
+	vector<double> hrad, heps, hchg;
+	vector<int> hres, atomLocalIndex;
+	vector<unsigned char> hsilent;
+
+	int lastChain = -1, lastRes = -1;
+	for (atomIterator aIter(this); !(aIter.last()); aIter++)
+	{
+		residue* pRes = aIter.getResiduePointer();
+		int ci = int(aIter.getChainIndex()), rin = int(aIter.getResidueIndex());
+		UInt ai = aIter.getAtomIndex();
+		if (ci != lastChain || rin != lastRes)
 		{
-			bool bonded = false;
-			if (aIter1.getChainIndex() ==  aIter2.getChainIndex() && aIter1.getResidueIndex() ==  aIter2.getResidueIndex()){
-				bonded = res1->isSeparatedByFewBonds(aIter1.getAtomIndex(), aIter2.getAtomIndex());
-			}
-			else{
-				residue* res2 = aIter2.getResiduePointer();
-				bonded = res1->isSeparatedByThreeBackboneBonds(aIter1.getAtomIndex(), res2, aIter2.getAtomIndex());
-			}
-			if (bonded){bon[bonCounter] = 1;} else{bon[bonCounter] = 0;}
-			bonCounter++;
+			resPtr.push_back(pRes); resChain.push_back(ci);
+			resFirstAtom.push_back(int(hrad.size())); resNumAtoms.push_back(0);
+			lastChain = ci; lastRes = rin;
 		}
-		Ncounter++; 
-    }
+		resNumAtoms.back()++;
+		hrad.push_back(pRes->getVDWRadius(ai));
+		heps.push_back(pRes->getVDWEpsilon(ai));
+		hchg.push_back(pRes->getCharge(ai));
+		hres.push_back(int(resPtr.size()) - 1);
+		atomLocalIndex.push_back(int(ai));
+		hsilent.push_back(pRes->getAtom(ai)->getSilentStatus() ? 1 : 0);
+	}
 
-	// Transfer loaded arrays to GPU to prepare for Energy calculation
-	loadEnergyDeviceMem(x, y, z, rad, eps, chg, vol, bon, &E, N);
-	deviceMemLoadedEnergy = true;
-}
+	const int N = int(hrad.size());
+	if (N <= 0) {return;}
+	const int numRes = int(resPtr.size());
 
-void protein::loadDeviceMemClash()
-{
-	// Allocate host (CPU) memory for arrays to be passed to device (GPU)
-	int N = getNumAtoms();
-	int bondingSize = N * (N - 1) / 2;
-	cudaMallocHost(&x, N * sizeof(double));
-	cudaMallocHost(&y, N * sizeof(double));
-	cudaMallocHost(&z, N * sizeof(double));
-	cudaMallocHost(&rad, N * sizeof(double));
-	cudaMallocHost(&bon, bondingSize * sizeof(int));
-
-	// Load arrays with xyz coords, vdw radius, epsilon and charge per atom, and also bonding flag per atom pair 
-	atomIterator aIter1(this); atom* pAtom1; UInt Ncounter = 0; UInt bonCounter = 0;
-    for (; !(aIter1.last()); aIter1++)
-    {
-		// Load xyz coords, vdw rad, epsilon and charge
-		pAtom1 = aIter1.getAtomPointer(); 
-        dblVec coords = pAtom1->getCoords(); x[Ncounter] = coords[0]; y[Ncounter] = coords[1]; z[Ncounter] = coords[2];
-		residue* res1 = aIter1.getResiduePointer();
-		rad[Ncounter] = res1->getVDWRadius(aIter1.getAtomIndex());
-
-		// Load bonding integer per non-redundant pair of atoms (1 for bonded within three bonds, 0 for not bonded)
-		atomIterator aIter2(aIter1); aIter2++;
-		for (; !(aIter2.last()); aIter2++)
+	// Exclusions, gathered per atom over a +/-1 residue window.  Both
+	// isSeparatedByFewBonds (intra-residue) and
+	// isSeparatedByThreeBackboneBonds (inter-residue, three backbone bonds)
+	// are bounded by that window, so nothing outside it can be excluded.
+	const int WINDOW = 1;
+	vector< vector<int> > excl(N);
+	for (int ri = 0; ri < numRes; ri++)
+	{
+		residue* res1 = resPtr[ri];
+		int lo = (ri - WINDOW > 0) ? ri - WINDOW : 0;
+		int hi = (ri + WINDOW < numRes - 1) ? ri + WINDOW : numRes - 1;
+		for (int ai = 0; ai < resNumAtoms[ri]; ai++)
 		{
-			bool bonded = false;
-			if (aIter1.getChainIndex() ==  aIter2.getChainIndex() && aIter1.getResidueIndex() ==  aIter2.getResidueIndex()){
-				bonded = res1->isSeparatedByFewBonds(aIter1.getAtomIndex(), aIter2.getAtomIndex());
+			int i = resFirstAtom[ri] + ai;
+			int li = atomLocalIndex[i];
+			for (int rj = lo; rj <= hi; rj++)
+			{
+				residue* res2 = resPtr[rj];
+				for (int aj = 0; aj < resNumAtoms[rj]; aj++)
+				{
+					int j = resFirstAtom[rj] + aj;
+					if (j == i) {continue;}
+					int lj = atomLocalIndex[j];
+					bool bonded;
+					if (ri == rj) {bonded = res1->isSeparatedByFewBonds(li, lj);}
+					else if (resChain[ri] == resChain[rj]) {bonded = res1->isSeparatedByThreeBackboneBonds(li, res2, lj);}
+					else {bonded = false;}
+					if (bonded) {excl[i].push_back(j);}
+				}
 			}
-			else{
-				residue* res2 = aIter2.getResiduePointer();
-				bonded = res1->isSeparatedByThreeBackboneBonds(aIter1.getAtomIndex(), res2, aIter2.getAtomIndex());
-			}
-			if (bonded){bon[bonCounter] = 1;} else{bon[bonCounter] = 0;}
-			bonCounter++;
 		}
-		Ncounter++; 
-    }
+	}
 
-	// Transfer loaded arrays to GPU to prepare for Energy calculation
-	loadClashDeviceMem(x, y, z, rad, bon, &clash, N);
-	deviceMemLoadedClash = true;
+	// Pack into the fixed-stride form the kernel reads.
+	int stride = 1;
+	for (int i = 0; i < N; i++) {if (int(excl[i].size()) > stride) {stride = int(excl[i].size());}}
+	vector<int> hcount(N), hlist((size_t)N * stride, 0);
+	for (int i = 0; i < N; i++)
+	{
+		hcount[i] = int(excl[i].size());
+		for (int k = 0; k < hcount[i]; k++) {hlist[(size_t)i * stride + k] = excl[i][k];}
+	}
+
+	energyTopology topo;
+	topo.numAtoms = N;
+	topo.radius = &hrad[0]; topo.epsilon = &heps[0]; topo.charge = &hchg[0];
+	topo.residueIndex = &hres[0]; topo.silent = &hsilent[0];
+	topo.exclusionCount = &hcount[0]; topo.exclusionList = &hlist[0];
+	topo.exclusionStride = stride;
+
+	// Pull the scale factors from the same accessors the CPU path uses rather
+	// than hardcoding them, which is what let the two paths drift apart.
+	// Model selection.  The default enables the corrected physics (occupancy
+	// dielectric, inscribed-cube clashes, exact 4pi/3); PROTCAD_ENERGY_LEGACY=1
+	// reproduces the original kernel's model bit-for-bit, which is what the
+	// existing energy calibrations were tuned against.  Kept as a runtime
+	// switch so old and new can be compared without a rebuild.
+	energyParams par;
+	if (itsEnergyParamsSet) {par = itsEnergyParams;}
+	else
+	{
+		const char* legacyEnv = getenv("PROTCAD_ENERGY_LEGACY");
+		bool useLegacy = (legacyEnv && legacyEnv[0] == '1');
+		par = useLegacy ? legacyEnergyParams() : defaultEnergyParams();
+	}
+	par.eSolvationFactor = residue::getElectroSolvationScaleFactor();
+	par.hSolvationFactor = residue::getHydroSolvationScaleFactor();
+	par.vdwScale = amberVDW::getScaleFactor();
+	par.elecScale = amberElec::getScaleFactor();
+
+	itsEnergyContext = energyCreate(topo, par);
+	if (!itsEnergyContext)
+	{
+		cout << "protein::buildEnergyContext failed: " << energyLastError(itsEnergyContext) << endl;
+		return;
+	}
+	itsCoordX.resize(N); itsCoordY.resize(N); itsCoordZ.resize(N);
+	deviceMemLoadedEnergy = true; deviceMemLoadedClash = true; deviceMemLoadedAll = true;
 }
 
-void protein::loadDeviceMemAll()
-{
-	// Allocate host (CPU) memory for arrays to be passed to device (GPU)
-	int N = getNumAtoms();
-	int bondingSize = N * (N - 1) / 2;
-	cudaMallocHost(&x, N * sizeof(double));
-	cudaMallocHost(&y, N * sizeof(double));
-	cudaMallocHost(&z, N * sizeof(double));
-	cudaMallocHost(&rad, N * sizeof(double));
-	cudaMallocHost(&eps, N * sizeof(double));
-	cudaMallocHost(&chg, N * sizeof(double));
-	cudaMallocHost(&vol, N * sizeof(double));
-	cudaMallocHost(&bon, bondingSize * sizeof(int));
+// Retained so existing callers keep working; the context now serves energy and
+// clash from one allocation, so all three requests are the same operation.
+void protein::loadDeviceMemEnergy() {buildEnergyContext();}
+void protein::loadDeviceMemClash()  {buildEnergyContext();}
+void protein::loadDeviceMemAll()    {buildEnergyContext();}
 
-	// Load arrays with xyz coords, vdw radius, epsilon and charge per atom, and also bonding flag per atom pair 
-	atomIterator aIter1(this); atom* pAtom1; UInt Ncounter = 0; UInt bonCounter = 0; E=0.0; clash=0; 
-    for (; !(aIter1.last()); aIter1++)
-    {
-		// Load xyz coords, vdw rad, epsilon and charge
-		pAtom1 = aIter1.getAtomPointer(); 
-        dblVec coords = pAtom1->getCoords(); x[Ncounter] = coords[0]; y[Ncounter] = coords[1]; z[Ncounter] = coords[2];
-		residue* res1 = aIter1.getResiduePointer();
-		rad[Ncounter] = res1->getVDWRadius(aIter1.getAtomIndex()); eps[Ncounter] = res1->getVDWEpsilon(aIter1.getAtomIndex()); 
-		chg[Ncounter] = res1->getCharge(aIter1.getAtomIndex()); vol[Ncounter] = 0.0;
-
-		// Load bonding integer per non-redundant pair of atoms (1 for bonded within three bonds, 0 for not bonded)
-		atomIterator aIter2(aIter1); aIter2++;
-		for (; !(aIter2.last()); aIter2++)
-		{
-			bool bonded = false;
-			if (aIter1.getChainIndex() ==  aIter2.getChainIndex() && aIter1.getResidueIndex() ==  aIter2.getResidueIndex()){
-				bonded = res1->isSeparatedByFewBonds(aIter1.getAtomIndex(), aIter2.getAtomIndex());
-			}
-			else{
-				residue* res2 = aIter2.getResiduePointer();
-				bonded = res1->isSeparatedByThreeBackboneBonds(aIter1.getAtomIndex(), res2, aIter2.getAtomIndex());
-			}
-			if (bonded){bon[bonCounter] = 1;} else{bon[bonCounter] = 0;}
-			bonCounter++;
-		}
-		Ncounter++; 
-    }
-
-	// Transfer loaded arrays to GPU to prepare for Energy calculation
-	loadAllDeviceMem(x, y, z, rad, eps, chg, vol, &clash, bon, &E, N);
-	deviceMemLoadedAll = true; deviceMemLoadedEnergy = true; deviceMemLoadedClash = true;
-}
-
-void protein::freeDeviceMemEnergy()
-{
-	// Free the GPU memory
-	freeEnergyDeviceMem();
-
-	// Free the CPU memory
-  	cudaFreeHost(x); cudaFreeHost(y); cudaFreeHost(z);
-  	cudaFreeHost(rad); cudaFreeHost(eps); cudaFreeHost(chg);
-  	cudaFreeHost(bon); cudaFreeHost(vol);
-	deviceMemLoadedEnergy = false;
-}
-
-void protein::freeDeviceMemClash()
-{
-	// Free the GPU memory
-	freeClashDeviceMem();
-
-	// Free the CPU memory
-	cudaFreeHost(x); cudaFreeHost(y); cudaFreeHost(z);
-  	cudaFreeHost(rad); cudaFreeHost(bon);
-	deviceMemLoadedClash = false;
-}
+void protein::freeDeviceMemEnergy() {freeDeviceMemAll();}
+void protein::freeDeviceMemClash()  {freeDeviceMemAll();}
 
 void protein::freeDeviceMemAll()
 {
-	// Free the GPU memory
-	freeAllDeviceMem();
+	if (itsEnergyContext) {energyDestroy(itsEnergyContext); itsEnergyContext = 0;}
+	itsCoordX.clear(); itsCoordY.clear(); itsCoordZ.clear();
+	deviceMemLoadedEnergy = false; deviceMemLoadedClash = false; deviceMemLoadedAll = false;
+}
 
-	// Free the CPU memory
-  	cudaFreeHost(x); cudaFreeHost(y); cudaFreeHost(z);
-  	cudaFreeHost(rad); cudaFreeHost(eps); cudaFreeHost(chg);
-  	cudaFreeHost(bon); cudaFreeHost(vol);
-	deviceMemLoadedEnergy = false;
-	deviceMemLoadedClash = false;
-	deviceMemLoadedAll = false;
+// Refresh coordinates and, if the topology changed underneath us, rebuild.
+// The original silently reused a stale context after a mutation changed the
+// atom count, which read past the end of the device arrays.
+int protein::updateDeviceCoords()
+{
+	buildEnergyContext();
+	if (!itsEnergyContext) {return 0;}
+
+	const int N = getNumAtoms();
+	if (N != int(itsCoordX.size()))
+	{
+		freeDeviceMemAll(); buildEnergyContext();
+		if (!itsEnergyContext) {return 0;}
+	}
+
+	atomIterator aIter(this); int i = 0;
+	for (; !(aIter.last()) && i < N; aIter++, i++)
+	{
+		dblVec coords = aIter.getAtomPointer()->getCoords();
+		itsCoordX[i] = coords[0]; itsCoordY[i] = coords[1]; itsCoordZ[i] = coords[2];
+	}
+	return i;
 }
 
 double protein::protEnergyCU()
 {
-	// Load device memory if need be
-	if (!deviceMemLoadedEnergy){loadDeviceMemEnergy();}
-
-    // update coordinates
-	atomIterator aIter(this);atom* pAtom; int Ncounter = 0; double E = 0;
-    for (;!(aIter.last());aIter++)
-    {
-		pAtom = aIter.getAtomPointer(); 
-        dblVec coords = pAtom->getCoords();
-		x[Ncounter] = coords[0]; 
-		y[Ncounter] = coords[1];
-		z[Ncounter] = coords[2];
-		vol[Ncounter] = 0.0;
-		Ncounter++;
-    }
-	calcEnergies(x, y, z, vol, &E, Ncounter);
-	return E;
+	int N = updateDeviceCoords();
+	if (N == 0) {return 0.0;}
+	double e = 0.0;
+	if (energyCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0], &e, 0))
+	{
+		cout << "protein::protEnergyCU failed: " << energyLastError(itsEnergyContext) << endl;
+		return 0.0;
+	}
+	E = e;
+	return e;
 }
+
+// Per-term decomposition, which the original could not provide: it reduced
+// everything into a single accumulator inside the kernel.
+bool protein::protEnergyBreakdownCU(energyBreakdown& _out)
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return false;}
+	double e = 0.0;
+	if (energyCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0], &e, &_out)) {return false;}
+	E = e;
+	return true;
+}
+
 int protein::getNumClashesCU()
 {
-	// Load device memory if need be
-	if (!deviceMemLoadedClash){loadDeviceMemClash();}
-
-    // update coordinates
-	atomIterator aIter(this);atom* pAtom; int Ncounter = 0; clash = 0;
-    for (;!(aIter.last());aIter++)
-    {
-		pAtom = aIter.getAtomPointer(); 
-        dblVec coords = pAtom->getCoords();
-		x[Ncounter] = coords[0]; 
-		y[Ncounter] = coords[1];
-		z[Ncounter] = coords[2];
-		Ncounter++;
-    }
-
-	//calculate Clashes with GPU kernel (no sqrt distance calc only)
-	calcClashes(x, y, z, &clash, Ncounter);
-	return clash;
+	int N = updateDeviceCoords();
+	if (N == 0) {return 0;}
+	int c = 0;
+	if (clashCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0], &c))
+	{
+		cout << "protein::getNumClashesCU failed: " << energyLastError(itsEnergyContext) << endl;
+		return 0;
+	}
+	clash = c;
+	return c;
 }
 
 void protein::protRelaxCU(UInt _plateau, bool _backbone)
