@@ -63,6 +63,7 @@ struct Snapshot
 {
 	std::vector<double> x, y, z;
 	double energy;
+	unsigned int clashes;
 };
 
 bool load(const std::string& file, Snapshot& s)
@@ -80,7 +81,8 @@ bool load(const std::string& file, Snapshot& s)
 		s.y.push_back(a->getY());
 		s.z.push_back(a->getZ());
 	}
-	s.energy = prot->protEnergy();
+	s.energy  = prot->protEnergy();
+	s.clashes = prot->getNumHardClashes();
 	return !s.x.empty();
 }
 
@@ -162,6 +164,40 @@ int main(int argc, char** argv)
 			          << " kcal/mol > " << energyTol << std::endl;
 			ok = false;
 		}
+	}
+
+	// Pin the absolute 1crn energy as well.  Invariance alone would still be
+	// satisfied by a model that had silently changed everywhere at once, and
+	// nothing else in the suite scores a real structure -- the synthetic cases
+	// in energyTest check the kernel against a reference implementation, not
+	// the parameters or the build applied to a PDB.  The tolerance is loose
+	// enough to absorb float reduction order but tight enough to catch a term
+	// being dropped or double counted.
+	const double refEnergy = 510.98;
+	const double refTol    = 0.05;
+	if (fabs(ref.energy - refEnergy) > refTol)
+	{
+		std::cout << "FAIL 1crn reference energy: " << ref.energy
+		          << " kcal/mol, expected " << refEnergy
+		          << " +/- " << refTol << std::endl;
+		ok = false;
+	}
+	else
+	{
+		std::cout << "1crn reference energy " << ref.energy
+		          << " kcal/mol, within " << refTol << " of " << refEnergy << std::endl;
+	}
+
+	const unsigned int refClashes = 450;
+	if (ref.clashes != refClashes)
+	{
+		std::cout << "FAIL 1crn reference clashes: " << ref.clashes
+		          << ", expected " << refClashes << std::endl;
+		ok = false;
+	}
+	else
+	{
+		std::cout << "1crn reference clashes " << ref.clashes << std::endl;
 	}
 
 	if (!ok) { std::cout << "invarianceTest FAILED" << std::endl; return 1; }
