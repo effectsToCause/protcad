@@ -6,11 +6,11 @@
 // Total energy evaluations is sweeps * replicas, so runs are directly
 // comparable across settings by holding that product fixed.
 //
-// Replicas defaults to 4. Energy at a fixed wall budget is monotone in
-// sweeps-per-chain, so for minimisation a small population is right; 4 is the
-// efficiency point rather than the deepest setting, and 1 and 2 are within
-// noise of it. Large values are for sampling an ensemble, not for driving one
-// structure downhill. See protMinReplicaCU in protein.cc for the measurements.
+// Replicas defaults to 1. Energy at a fixed wall budget is monotone in
+// sweeps-per-chain, and a matched-wall test resolves what the earlier sweep
+// could not: a population is not merely unnecessary for minimisation, it is
+// mildly harmful. Raise it to sample an ensemble, not to minimise faster.
+// See protMinReplicaCU in protein.cc for the measurements.
 
 #include "ensemble.h"
 #include "PDBInterface.h"
@@ -29,11 +29,12 @@ int main (int argc, char* argv[])
 {
 	if (argc != 4 && argc != 5)
 	{   cout << "protMinRep <sweeps> [replicas] <inFile.pdb> <outFile.pdb>" << endl;
-		cout << "  replicas defaults to 4" << endl;
+		cout << "  replicas defaults to 1; raise it to sample an ensemble," << endl;
+		cout << "  not to minimise faster -- see protMinReplicaCU" << endl;
 		exit(1); }
 
 	UInt sweeps   = (UInt)atoi(argv[1]);
-	UInt replicas = (argc == 5) ? (UInt)atoi(argv[2]) : 4;
+	UInt replicas = (argc == 5) ? (UInt)atoi(argv[2]) : 1;
 	string infile  = argv[argc - 2];
 	string outFile = argv[argc - 1];
 
