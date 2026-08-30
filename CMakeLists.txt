@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-# CUDA and Fortran are both optional-by-detection rather than hard requirements,
-# so the language list is assembled before project() is called.
+# CUDA is optional-by-detection rather than a hard requirement, so the language
+# list is assembled before project() is called.
 project(protcad LANGUAGES CXX)
 
 include(CheckLanguage)
@@ -13,13 +13,6 @@ if(CMAKE_CUDA_COMPILER)
 else()
     set(PROTCAD_CUDA OFF)
     message(STATUS "protcad: no CUDA compiler found, building the CPU-only path")
-endif()
-
-check_language(Fortran)
-if(CMAKE_Fortran_COMPILER)
-    enable_language(Fortran)
-else()
-    message(FATAL_ERROR "protcad: a Fortran compiler is required for src/math/bestfit.f")
 endif()
 
 set(CMAKE_CXX_STANDARD 11)
@@ -51,9 +44,7 @@ file(GLOB PROTCAD_CXX_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/io/*.cc
     ${CMAKE_SOURCE_DIR}/src/math/*.cc)
 
-add_library(protcad STATIC
-    ${PROTCAD_CXX_SOURCES}
-    ${CMAKE_SOURCE_DIR}/src/math/bestfit.f)
+add_library(protcad STATIC ${PROTCAD_CXX_SOURCES})
 
 target_include_directories(protcad PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -73,12 +64,6 @@ if(PROTCAD_NATIVE_ARCH)
     target_compile_options(protcad PUBLIC
         $<$<COMPILE_LANGUAGE:CXX>:-march=native;-mtune=native>)
 endif()
-
-set_source_files_properties(${CMAKE_SOURCE_DIR}/src/math/bestfit.f PROPERTIES
-    COMPILE_OPTIONS "-Wall;-Wno-tabs;-Wno-unused-dummy-argument;-Wno-unused-variable")
-
-# gfortran's runtime is needed because the driver is g++, not gfortran.
-target_link_libraries(protcad PUBLIC gfortran)
 
 if(PROTCAD_CUDA)
     target_sources(protcad PRIVATE ${CMAKE_SOURCE_DIR}/src/ensemble/energy.cu)
@@ -118,7 +103,7 @@ if(PROTCAD_BUILD_TESTS)
     enable_testing()
 
     # Self-contained: they build their own inputs and exit nonzero on failure.
-    set(PROTCAD_SELF_TESTS amberParamsTest batchTest energyTest replicaTest)
+    set(PROTCAD_SELF_TESTS amberParamsTest batchTest bestfitTest energyTest replicaTest)
     # Need a structure argument.
     set(PROTCAD_PDB_TESTS clashCheck energyTerms rotamerTest)
 

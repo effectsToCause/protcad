@@ -37,7 +37,7 @@ Then follow the Ubuntu Linux install dependency instructions and install below i
 
 In terminal:
 
-sudo apt install g++ gfortran git cmake
+sudo apt install g++ git cmake
 
 For automatic cuda support you will also need:
 
@@ -51,7 +51,7 @@ xcode-select --install
 
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-brew install gcc gfortran git cmake
+brew install gcc git cmake
 
 
 === Install
