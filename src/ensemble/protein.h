@@ -226,6 +226,12 @@ public:
 	void freeDeviceMemAll();
 	double protEnergyCU();
 	int getNumClashesCU();
+	void buildEnergyContext();
+	// Override the model used by the next buildEnergyContext().  Intended for
+	// validation and ablation; call freeDeviceMemAll() first to force a rebuild.
+	void setEnergyParamsOverride(const energyParams& _p);
+	int updateDeviceCoords();
+	bool protEnergyBreakdownCU(energyBreakdown& _out);
 	void protRelaxCU(UInt _plateau, bool _backbone);
 	void protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains);
 	void protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains);
@@ -336,14 +342,18 @@ private:
 	bool (protein::*itsModificationMethods[5])(ran& _ran);
 
 	//--CUDA variables
-	double* rad; 
-	double* eps; 
-	double* chg;
-	double* vol;
-	double* x; 
-	double* y; 
-	double* z;
-	int* bon; 
+	// One opaque handle replaces the eight raw device pointers.  All static
+	// per-atom data and the bonded-exclusion lists live inside it, so energy
+	// and clash queries share a single allocation instead of each rebuilding
+	// their own copy of the topology.
+// Declared unconditionally.  Guarding data members with #ifdef __CUDA__ makes
+// sizeof(protein) depend on a compile flag, so any translation unit built
+// without it disagrees about the object layout -- an ODR violation that shows
+// up as heap corruption far from the actual cause.
+	energyContext* itsEnergyContext = 0;
+	energyParams itsEnergyParams;
+	bool itsEnergyParamsSet = false;
+	std::vector<double> itsCoordX, itsCoordY, itsCoordZ;
 	double E;
 	int clash;
 	bool deviceMemLoadedEnergy = false;

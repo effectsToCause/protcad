@@ -2,3 +2,7 @@
 .*.swp
 .DS_Store
 .vscode
+bin/
+obj/
+NULL
+Fast

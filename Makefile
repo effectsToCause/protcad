@@ -38,19 +38,35 @@ LIB_CU_OBJECTS = energy.o
 
 DEFS = -D__STL_USE_EXCEPTIONS
 
-FLAG_OPTMAX = -Wall -oFast -ffast-math -ftree-vectorize -march=native -mtune=native -pipe -msse3 -Wno-deprecated -std=gnu++11
+CUDA_HOME ?= /usr/local/cuda
+CUDA_LIBDIR ?= $(CUDA_HOME)/lib64
+
+FLAG_OPTMAX = -Wall -Ofast -ffast-math -ftree-vectorize -march=native -mtune=native -pipe -msse3 -Wno-deprecated -std=gnu++11
 
 CFLAGS = $(FLAG_OPTMAX) $(DEFS)
 
 FFLAGS = -Wall -g -Wno-tabs -Wno-unused-dummy-argument -Wno-unused-variable
 
-CUFLAGS = -arch=sm_60
+# Multi-arch fatbin so one build runs on Pascal through Ampere, plus PTX for
+# anything newer.  The previous -arch=sm_60 alone produced cubins that will not
+# load on any card newer than the one it was written for.  -O3 was also absent,
+# leaving device code unoptimised.
+GENCODE = -gencode arch=compute_61,code=sm_61 \
+-gencode arch=compute_75,code=sm_75 \
+-gencode arch=compute_86,code=sm_86 \
+-gencode arch=compute_86,code=compute_86
+
+CUFLAGS = -O3 $(GENCODE) -D__CUDA__ -Xcompiler -fPIC $(INC_BASE)
 
 INC_BASE = -I$(SRCDIR)/ensemble -I$(SRCDIR)/io \
 -I$(SRCDIR)/math -I$(SRCDIR)/database -I$(TNTINCLUDE)
 
 ifeq ($(NVCC_TEST),nvcc)
-	LIB_BASE = -L$(OBJDIR) -lprotcad -lc -lm -lstdc++ -lcuda -lcudart
+	# Without -L the CUDA libdir, -lcudart was never found; without -D__CUDA__
+	# every GPU call site in protein.cc was preprocessed away, so the kernels
+	# were compiled and then never called.
+	DEFS += -D__CUDA__
+	LIB_BASE = -L$(OBJDIR) -L$(CUDA_LIBDIR) -lprotcad -lc -lm -lstdc++ -lcuda -lcudart
 	LIBS = $(LIB_CC_OBJECTS) $(LIB_F77_OBJECTS) $(LIB_CU_OBJECTS)
 else
 	LIB_BASE = -L$(OBJDIR) -lprotcad -lc -lm -lstdc++
@@ -159,17 +175,26 @@ protTest : libprotcad.a protTest.cc
 	cd $(OBJDIR) && $(CXX) $(CFLAGS) $^ -o $@ $(INC_BASE) $(LIB_BASE)
 	cd $(OBJDIR) && strip $@ && mv $@ $(BINDIR)
 
+# -MMD -MP records the full transitive header dependencies.  The rule
+# previously listed only each file's own header, so a change to a shared header
+# such as energy.h left every other object stale -- silently mixing two
+# incompatible struct layouts in one binary.
 $(LIB_CC_OBJECTS): %.o: %.cc %.h
-	$(CXX) -c $(CFLAGS) $(INC_BASE) $< -o $@
+	$(CXX) -c $(CFLAGS) -MMD -MP $(INC_BASE) $< -o $@
 	mv $@ $(OBJDIR)
+	mv $(notdir $*).d $(OBJDIR)
 
 $(LIB_F77_OBJECTS): %.o: %.f
 	$(F77) -c $(FFLAGS) $< -o $@
 	mv $@ $(OBJDIR)
 
 $(LIB_CU_OBJECTS): %.o: %.cu
-	$(CU) -c $(CUFLAGS) $< -o $@
+	$(CU) -c $(CUFLAGS) -MD -MF $(notdir $*).d $< -o $@
 	mv $@ $(OBJDIR)
+	mv $(notdir $*).d $(OBJDIR)
+	@rm -f NULL   # nvcc emits a stray 'NULL' alongside the dependency file
+
+-include $(wildcard $(OBJDIR)/*.d)
 
 protcad:
 ifeq ($(UNAME),Linux)
