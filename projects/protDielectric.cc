@@ -36,6 +36,7 @@ int main (int argc, char* argv[])
 	string outFile;
 
     _prot->protEnergy();
+    _prot->updateDielectrics();
     cout << " position" << " residue" << " dielectric" << endl;
     for (UInt i = 0; i < _prot->getNumChains(); i++)
     {

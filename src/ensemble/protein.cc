@@ -2252,6 +2252,36 @@ double protein::protEnergyCU(UInt _chainIndex)
 	return e;
 }
 
+// Refresh every atom's stored local dielectric from the kernel.
+//
+// The CPU path derived these from a pairwise polarizability pass followed by a
+// per-chain reduction.  The kernel already computes the same field -- the shell
+// occupancy that scales the electrostatic term -- so exporting it is both
+// cheaper and guaranteed consistent: a dielectric reported here is by
+// construction the one the energy was evaluated with, which the two separate
+// implementations could not promise.
+//
+// Values land in the atoms in atomIterator order, the same ordering contract
+// buildEnergyContext uses, so residue::getDielectric keeps working unchanged.
+void protein::updateDielectricsCU()
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return;}
+	vector<double> diel(N, 0.0);
+	if (shellCompute(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0],
+	                 &diel[0], 0))
+	{
+		cout << "protein::updateDielectricsCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return;
+	}
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		aIter.getResiduePointer()->getAtom(aIter.getAtomIndex())->setDielectric(diel[i]);
+	}
+}
+
 // Per-term decomposition, which the original could not provide: it reduced
 // everything into a single accumulator inside the kernel.
 bool protein::protEnergyBreakdownCU(energyBreakdown& _out)
@@ -2663,34 +2693,12 @@ void protein::updateEnergy(UInt chainIndex)
 
 void protein::updateDielectrics()
 {
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		itsChains[i]->polarizability();
-		for(UInt j=i+1; j<itsChains.size(); j++)
-		{
-			itsChains[i]->polarizability(itsChains[j]);
-		}
-	}
-	calculateDielectrics();
+	updateDielectricsCU();
 }
 
 void protein::updateDielectrics(UInt chainIndex)
 {
-	itsChains[chainIndex]->polarizability();
-	calculateDielectrics(chainIndex);
-}
-
-void protein::calculateDielectrics()
-{
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		itsChains[i]->calculateDielectrics();
-	}
-}
-
-void protein::calculateDielectrics(UInt chainIndex)
-{
-	itsChains[chainIndex]->calculateDielectrics();
+	updateDielectricsCU();
 }
 
 void protein::updateMovedDependence(UInt _EorC)

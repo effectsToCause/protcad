@@ -1,0 +1,8 @@
+Input PDB File,xyz.pdb,
+Active Chains,0,1,2,
+Active Positions,0,1,2,3,5,6,7,9,10,
+Random Positions,0,2,5,6,10,
+Frozen Positions,4,8,
+Amino Acids,A,R,N,D,C,Q,E,He,I,L,K,M,F,P,S,T,W,Y,V,G,
+Backbone Relaxation,false,
+Polarity Assignment,true,

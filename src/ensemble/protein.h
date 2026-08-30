@@ -194,10 +194,6 @@ public:
 	double getSoluteEnergy(UInt chainIndex, UInt resIndex, UInt atomIndex, UInt otherChainIndex, UInt otherResIndex, UInt otherAtomIndex);
 	double getBackboneHBondEnergy(UInt donorChainIndex, UInt donorResIndex, UInt acceptorChainIndex, UInt acceptorResIndex);
 	vector <double> chainBindingEnergy();
-	void polarizability();
-	void calculateDielectrics();
-	void calculateDielectrics(UInt chainIndex);
-	double calculateSolvationEnergy(UInt _chainIndex, UInt _residueIndex, UInt _atomIndex) {return itsChains[_chainIndex]->itsResidues[_residueIndex]->calculateSolvationEnergy( _atomIndex);}
 	//vector <double> calculateChainIndependentDielectric(chain* _chain, residue* _residue, atom* _atom);
 	//vector <double> calculateResidueIndependentDielectric(residue* _residue, atom* _atom);
 	void updateDielectrics();
@@ -226,6 +222,7 @@ public:
 	void freeDeviceMemAll();
 	double protEnergyCU();
 	double protEnergyCU(UInt _chainIndex);
+	void updateDielectricsCU();
 	int getNumClashesCU();
 	void buildEnergyContext();
 	int itsDisulfideCount;
