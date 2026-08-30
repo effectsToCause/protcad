@@ -589,11 +589,16 @@ __global__ void kOccupancy(int nTiles,
                            const ereal* __restrict__ tileLo,
                            const ereal* __restrict__ tileHi,
                            energyParams p, ereal v43, int occModel,
+                           int nCand, int jSplit,
                            ereal* __restrict__ occ)
 {
+    // Same j-split as kEnergy; see chooseSplit.  The occlusion sum has no
+    // epilogue at all, so every chunk simply owns a stride of j.
+    const int chunk = blockIdx.z;
     {
         const size_t k = blockIdx.y, nPad = (size_t)nTiles * TILE;
-        sx += k * nPad; sy += k * nPad; sz += k * nPad; occ += k * nPad;
+        sx += k * nPad; sy += k * nPad; sz += k * nPad;
+        occ += ((size_t)chunk * nCand + k) * nPad;
         tileLo += k * (size_t)nTiles * 3; tileHi += k * (size_t)nTiles * 3;
     }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK], shR[BLOCK], shV[BLOCK];
@@ -621,7 +626,7 @@ __global__ void kOccupancy(int nTiles,
     ereal acc = ereal(0);
     const int base = warp * TILE;
 
-    for (int jTile = 0; jTile < nTiles; ++jTile)
+    for (int jTile = chunk; jTile < nTiles; jTile += jSplit)
     {
         ereal d2 = boxBoxDist2(aLoX, aLoY, aLoZ, aHiX, aHiY, aHiZ,
                                tileLo[jTile * 3 + 0], tileLo[jTile * 3 + 1], tileLo[jTile * 3 + 2],
@@ -834,6 +839,18 @@ __global__ void kEnergy(int nTiles,
 // chunks in increasing index order, so the summation order is fixed and the
 // result is reproducible.  With jSplit == 1 this degenerates to a copy and the
 // values are bit-identical to an unsplit kernel.
+__global__ void kReduceOcc(int nCand, int nPad, int jSplit,
+                           const ereal* __restrict__ part,
+                           ereal* __restrict__ occ)
+{
+    const size_t total = (size_t)nCand * nPad;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    ereal a = ereal(0);
+    for (int c = 0; c < jSplit; ++c) a += part[(size_t)c * total + idx];
+    occ[idx] = a;
+}
+
 __global__ void kReduceParts(int nCand, int nPad, int jSplit,
                              const ereal* __restrict__ part,
                              ereal* __restrict__ eVdw,
@@ -1402,11 +1419,28 @@ static int energyComputeImpl(energyContext* ctx,
 
     int blocks = (nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 
-    kOccupancy<<<blocks, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+    if (!ensurePart(ctx, 1)) {
+        setError(ctx, "occupancy", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    {
+        // The occlusion partials borrow the energy partial buffer.  Ordering
+        // makes that safe: the occupancy reduction completes on this stream
+        // before the energy pass writes anything, and the energy pass reads
+        // only the reduced occ array.
+        const int jSplit = ctx->jSplit;
+        dim3 gOcc(blocks, 1, jSplit);
+        kOccupancy<<<gOcc, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
                                   ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                   ctx->d_tileLo, ctx->d_tileHi,
-                                  ctx->p, v43, ctx->p.occupancy, ctx->d_occ);
-    CUDA_OK(ctx, cudaPeekAtLastError());
+                                  ctx->p, v43, ctx->p.occupancy, 1, jSplit,
+                                  ctx->d_part);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
+                                                       ctx->d_part, ctx->d_occ);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
 
     if (!ensurePart(ctx, 1)) {
         setError(ctx, "energyComputeImpl", "out of memory for j-split partials",
@@ -1807,12 +1841,26 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
 
     CUDA_OK(ctx, cudaMemset(ctx->d_bocc, 0, (size_t)nCand * nPad * sizeof(ereal)));
 
+    if (!ensurePart(ctx, nCand)) {
+        setError(ctx, "evalBatch", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
     dim3 gWork((nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK, nCand);
-    kOccupancy<<<gWork, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
+    {
+        const int jSplit = ctx->jSplit;
+        dim3 gOcc((nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK, nCand, jSplit);
+        kOccupancy<<<gOcc, BLOCK>>>(nT, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
                                  ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                  ctx->d_btileLo, ctx->d_btileHi,
-                                 ctx->p, v43, ctx->p.occupancy, ctx->d_bocc);
-    CUDA_OK(ctx, cudaPeekAtLastError());
+                                 ctx->p, v43, ctx->p.occupancy, nCand, jSplit,
+                                 ctx->d_part);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        const size_t tot = (size_t)nCand * nPad;
+        kReduceOcc<<<(int)((tot + 255) / 256), 256>>>(nCand, nPad, jSplit,
+                                                      ctx->d_part, ctx->d_bocc);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
 
     double tOcc = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
 
@@ -2222,11 +2270,28 @@ int shellCompute(energyContext* ctx,
     CUDA_OK(ctx, cudaMemset(ctx->d_occ, 0, nPad * sizeof(ereal)));
 
     int blocks = (nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-    kOccupancy<<<blocks, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+    if (!ensurePart(ctx, 1)) {
+        setError(ctx, "occupancy", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    {
+        // The occlusion partials borrow the energy partial buffer.  Ordering
+        // makes that safe: the occupancy reduction completes on this stream
+        // before the energy pass writes anything, and the energy pass reads
+        // only the reduced occ array.
+        const int jSplit = ctx->jSplit;
+        dim3 gOcc(blocks, 1, jSplit);
+        kOccupancy<<<gOcc, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
                                   ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                   ctx->d_tileLo, ctx->d_tileHi,
-                                  ctx->p, v43, ctx->p.occupancy, ctx->d_occ);
-    CUDA_OK(ctx, cudaPeekAtLastError());
+                                  ctx->p, v43, ctx->p.occupancy, 1, jSplit,
+                                  ctx->d_part);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
+                                                       ctx->d_part, ctx->d_occ);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
 
     // Reuse the energy term scratch; the energy pass has no live data here.
     kShellExport<<<(nPad + 255) / 256, 256>>>(nT, ctx->d_srad, ctx->d_ssilent,
