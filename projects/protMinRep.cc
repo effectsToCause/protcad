@@ -1,10 +1,16 @@
 // protMinRep -- fixed-budget population Monte Carlo sidechain minimisation.
 //
-//   protMinRep <sweeps> <replicas> <inFile.pdb> <outFile.pdb>
+//   protMinRep <sweeps> [replicas] <inFile.pdb> <outFile.pdb>
 //
 // Unlike protMin there is no plateau detection: the cost is chosen up front.
 // Total energy evaluations is sweeps * replicas, so runs are directly
 // comparable across settings by holding that product fixed.
+//
+// Replicas defaults to 4. Energy at a fixed wall budget is monotone in
+// sweeps-per-chain, so for minimisation a small population is right; 4 is the
+// efficiency point rather than the deepest setting, and 1 and 2 are within
+// noise of it. Large values are for sampling an ensemble, not for driving one
+// structure downhill. See protMinReplicaCU in protein.cc for the measurements.
 
 #include "ensemble.h"
 #include "PDBInterface.h"
@@ -21,14 +27,15 @@ static double wall()
 
 int main (int argc, char* argv[])
 {
-	if (argc != 5)
-	{   cout << "protMinRep <sweeps> <replicas> <inFile.pdb> <outFile.pdb>" << endl;
+	if (argc != 4 && argc != 5)
+	{   cout << "protMinRep <sweeps> [replicas] <inFile.pdb> <outFile.pdb>" << endl;
+		cout << "  replicas defaults to 4" << endl;
 		exit(1); }
 
 	UInt sweeps   = (UInt)atoi(argv[1]);
-	UInt replicas = (UInt)atoi(argv[2]);
-	string infile = argv[3];
-	string outFile = argv[4];
+	UInt replicas = (argc == 5) ? (UInt)atoi(argv[2]) : 4;
+	string infile  = argv[argc - 2];
+	string outFile = argv[argc - 1];
 
 	PDBInterface* thePDB = new PDBInterface(infile);
 	ensemble* theEnsemble = thePDB->getEnsemblePointer();
