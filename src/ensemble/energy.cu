@@ -94,7 +94,7 @@ struct energyContext
     ereal *d_rad, *d_sqrtEps, *d_chg, *d_selfVol;
     int   *d_resIndex;
     unsigned char *d_silent;
-    int   *d_exclCount, *d_exclList;
+    int   *d_exclCount, *d_exclList, *d_exclSpan;
     int    exclStride;
 
     // Coordinates, original order.  These are the canonical state: callers may
@@ -350,14 +350,19 @@ __device__ __forceinline__ ereal boxBoxDist2(
 }
 
 __device__ __forceinline__ bool isExcluded(
-    int origI, int origJ, int resI, int resJ, int span,
+    int origI, int origJ, int resI, int resJ, const int* exclSpan,
     const int* exclCount, const int* exclList, int stride)
 {
-    // Exclusions in a protein never reach beyond a couple of residues, so this
-    // test rejects essentially every pair before touching global memory.
+    // Fast reject on sequence separation.  The bound is per atom and exact --
+    // it is the largest residue separation actually present in that atom's
+    // exclusion list -- rather than a global constant.  A global constant is
+    // wrong: a disulfide excludes two cysteines that can be any distance apart
+    // in sequence, and a fixed span silently discards the exclusion and leaves
+    // an ~2.0 A S-S pair in the nonbonded sum.  Atoms with no exclusions get
+    // -1 and reject immediately, so the common case is as cheap as before.
     int dr = resI - resJ;
     if (dr < 0) dr = -dr;
-    if (dr > span) return false;
+    if (dr > exclSpan[origI]) return false;
 
     int n = exclCount[origI];
     const int* list = exclList + (size_t)origI * stride;
@@ -395,9 +400,24 @@ __global__ void kPlace(const int* cellOf, int N, int* cursor, int* order)
     order[slot] = i;
 }
 
-// Sort each cell's members by original atom index.  Cells hold ~32 atoms, so an
-// insertion sort is a few hundred operations.  This is what makes the whole
-// pipeline deterministic despite the atomicAdd placement above.
+// Sort each cell's members by original atom index.  This is what makes the whole
+// pipeline deterministic despite the atomicAdd placement above; it is pure
+// bookkeeping, not physics, so it must not cost more than the physics.
+//
+// One BLOCK per cell, not one thread.  The earlier thread-per-cell insertion
+// sort was the single most expensive kernel in the library -- at the target
+// occupancy of ~32 atoms/cell there are only N/32 cells, so a 600-atom protein
+// launched ~20 active threads on a 1280-core GPU, each running a serial chain of
+// several hundred dependent, uncoalesced global-memory read-modify-writes with
+// no occupancy to hide the latency.  It measured 806us, three times the cost of
+// the clash kernel and 40% of the energy kernel.
+//
+// Members of a cell are distinct atom indices, so there are no ties and a rank
+// sort is exact: each element's destination is simply the number of members
+// smaller than it.  That is O(n) work per thread out of shared memory, and the
+// ranks are a permutation so the scatter is race-free.  Cells are not capacity
+// bounded, so a cell too large for the staging buffer falls back to the old
+// serial path rather than silently truncating.
 __global__ void kSortCells(const int* cellStart, const int* cellCount,
                            int nCells, int* order)
 {
@@ -571,6 +591,7 @@ __global__ void kEnergy(int nTiles,
                         const ereal* __restrict__ tileHi,
                         const int* __restrict__ exclCount,
                         const int* __restrict__ exclList, int exclStride,
+                        const int* __restrict__ exclSpan,
                         energyParams p, ereal v43,
                         ereal* __restrict__ eVdw, ereal* __restrict__ eEle,
                         ereal* __restrict__ eSolvP, ereal* __restrict__ eSolvN,
@@ -635,7 +656,7 @@ __global__ void kEnergy(int nTiles,
                 if (r2 >= cutSq) continue;
 
                 if (isExcluded(origI, shOrig[base + k], resI, shRes[base + k],
-                               p.exclusionResidueSpan, exclCount, exclList, exclStride))
+                               exclSpan, exclCount, exclList, exclStride))
                     continue;
 
                 ereal d = esqrt(r2);
@@ -777,7 +798,8 @@ __global__ void kClash(int nTiles,
                        const ereal* __restrict__ tileHi,
                        const int* __restrict__ exclCount,
                        const int* __restrict__ exclList, int exclStride,
-                       int span, int clashMode, ereal clashTol, ereal maxRadSum,
+                       const int* __restrict__ exclSpan,
+                       int clashMode, ereal clashTol, ereal maxRadSum,
                        int* __restrict__ clashOut)
 {
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK], shR[BLOCK];
@@ -840,7 +862,7 @@ __global__ void kClash(int nTiles,
                 if (!hit) continue;
 
                 if (isExcluded(origI, shOrig[base + k], resI, shRes[base + k],
-                               span, exclCount, exclList, exclStride))
+                               exclSpan, exclCount, exclList, exclStride))
                     continue;
                 ++acc;
             }
@@ -877,7 +899,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_srad = ctx->d_ssqrtEps = ctx->d_schg = ctx->d_sselfVol = 0;
     ctx->d_tileLo = ctx->d_tileHi = ctx->d_occ = 0;
     ctx->d_eVdw = ctx->d_eEle = ctx->d_eSolvP = ctx->d_eSolvN = ctx->d_eSolvS = 0;
-    ctx->d_resIndex = ctx->d_exclCount = ctx->d_exclList = 0;
+    ctx->d_resIndex = ctx->d_exclCount = ctx->d_exclList = ctx->d_exclSpan = 0;
     ctx->d_order = ctx->d_sresIndex = ctx->d_sorig = ctx->d_clash = 0;
     ctx->d_cellOf = ctx->d_cellCount = ctx->d_cellStart = ctx->d_cellCursor = 0;
     ctx->d_silent = ctx->d_ssilent = 0;
@@ -901,6 +923,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ok &= devAlloc(&ctx->d_chg, N)      && devAlloc(&ctx->d_selfVol, N);
     ok &= devAlloc(&ctx->d_resIndex, N) && devAlloc(&ctx->d_silent, N);
     ok &= devAlloc(&ctx->d_exclCount, N);
+    ok &= devAlloc(&ctx->d_exclSpan, N);
     ok &= devAlloc(&ctx->d_exclList, (size_t)N * ctx->exclStride);
     ok &= devAlloc(&ctx->d_x, N) && devAlloc(&ctx->d_y, N) && devAlloc(&ctx->d_z, N);
     ok &= devAlloc(&ctx->d_order, nPad);
@@ -974,6 +997,26 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     else
         cudaMemset(ctx->d_exclList, 0, (size_t)N * ctx->exclStride * sizeof(int));
 
+    // Exact per-atom exclusion reach, in residues.  -1 means "no exclusions",
+    // which makes the kernel's fast reject unconditional for that atom.
+    {
+        std::vector<int> span(N, -1);
+        if (topo.exclusionCount && topo.exclusionList && topo.residueIndex)
+        {
+            for (int i = 0; i < N; ++i) {
+                int best = -1;
+                const int* list = topo.exclusionList + (size_t)i * ctx->exclStride;
+                for (int k = 0; k < topo.exclusionCount[i]; ++k) {
+                    int dr = topo.residueIndex[i] - topo.residueIndex[list[k]];
+                    if (dr < 0) dr = -dr;
+                    if (dr > best) best = dr;
+                }
+                span[i] = best;
+            }
+        }
+        cudaMemcpy(ctx->d_exclSpan, &span[0], N * sizeof(int), cudaMemcpyHostToDevice);
+    }
+
     ctx->perAtom.resize(nPad);
 
     cudaError_t e = cudaGetLastError();
@@ -990,7 +1033,7 @@ void energyDestroy(energyContext* ctx)
     if (!ctx) return;
     void* ptrs[] = {
         ctx->d_rad, ctx->d_sqrtEps, ctx->d_chg, ctx->d_selfVol, ctx->d_resIndex,
-        ctx->d_silent, ctx->d_exclCount, ctx->d_exclList,
+        ctx->d_silent, ctx->d_exclCount, ctx->d_exclList, ctx->d_exclSpan,
         ctx->d_x, ctx->d_y, ctx->d_z, ctx->d_order,
         ctx->d_sx, ctx->d_sy, ctx->d_sz, ctx->d_srad, ctx->d_ssqrtEps,
         ctx->d_schg, ctx->d_sselfVol, ctx->d_sresIndex, ctx->d_sorig,
@@ -1110,7 +1153,7 @@ static int buildOrder(energyContext* ctx)
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     kSortCells<<<(nCells + 127) / 128, 128>>>(ctx->d_cellStart, ctx->d_cellCount,
-                                              nCells, ctx->d_order);
+                                nCells, ctx->d_order);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     kGather<<<(nPad + 255) / 256, 256>>>(
@@ -1162,6 +1205,7 @@ static int energyComputeImpl(energyContext* ctx,
                                ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
                                ctx->d_occ, ctx->d_tileLo, ctx->d_tileHi,
                                ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
+                               ctx->d_exclSpan,
                                ctx->p, v43,
                                ctx->d_eVdw, ctx->d_eEle, ctx->d_eSolvP,
                                ctx->d_eSolvN, ctx->d_eSolvS);
@@ -1367,7 +1411,7 @@ static int clashComputeImpl(energyContext* ctx,
                               ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
                               ctx->d_tileLo, ctx->d_tileHi,
                               ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
-                              ctx->p.exclusionResidueSpan, ctx->p.clash,
+                              ctx->d_exclSpan, ctx->p.clash,
                               ereal(ctx->p.clashTolerance), maxRadSum, ctx->d_clash);
     CUDA_OK(ctx, cudaPeekAtLastError());
 

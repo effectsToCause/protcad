@@ -1196,9 +1196,18 @@ void protein::setEnergyParamsOverride(const energyParams& _p)
 	itsEnergyParams = _p; itsEnergyParamsSet = true;
 }
 
+// Add a symmetric nonbonded exclusion, skipping duplicates.
+static void addExclusionPair(vector< vector<int> >& _excl, int _i, int _j)
+{
+	for (UInt k = 0; k < _excl[_i].size(); k++) {if (_excl[_i][k] == _j) {return;}}
+	_excl[_i].push_back(_j);
+	_excl[_j].push_back(_i);
+}
+
 void protein::buildEnergyContext()
 {
 	if (itsEnergyContext) {return;}
+	itsDisulfideCount = 0;
 
 	// Enumerate atoms with the same atomIterator used to upload coordinates.
 	// Deriving the topology from a separate nested walk over chains/residues
@@ -1222,18 +1231,22 @@ void protein::buildEnergyContext()
 			lastChain = ci; lastRes = rin;
 		}
 		resNumAtoms.back()++;
-		// Atom radius source.  getRadius() is the element-level table
-		// (atom.cc dataBase); getVDWRadius() is the AMBER energy-type table
-		// used by the vdW term itself.  For heavy atoms the two agree to
-		// within 0.01 A, but they differ sharply for hydrogen: the element
-		// table assigns every H a flat 1.090 A while AMBER resolves H by
-		// chemical environment over 1.00-1.49 A.  That single difference
-		// changes the hard-clash count by about 1.8x.  The element table is
-		// what the shipped clash calibration was built against, so it is kept
-		// here; switching to getVDWRadius() would make the clash criterion and
-		// the vdW term agree on atom size, but requires recalibrating
-		// energyParams::clashTolerance.
-		hrad.push_back(pRes->getRadius(ai));
+		// Atom radius source.  This single array is the radius for the vdW,
+		// solvation and clash terms alike, so it has to be the AMBER
+		// energy-type table: getVDWEpsilon() on the next line is an AMBER well
+		// depth, and pairing it with a radius from a different table would mix
+		// two force fields in one Lennard-Jones pair.
+		//
+		// The alternative, getRadius(), is the element-level table in the
+		// atom.cc dataBase.  It agrees with AMBER to within 0.01 A on heavy
+		// atoms but assigns every hydrogen a flat 1.090 A, which is a C-H bond
+		// length rather than a van der Waals radius, where AMBER resolves H by
+		// chemical environment over 1.00-1.49 A.  The CPU clash test uses that
+		// element table, so GPU and CPU clash counts differ by roughly 1.8x;
+		// that is the CPU being wrong, not a GPU calibration error, and it goes
+		// away when the CPU path is retired.  energyParams::clashTolerance is a
+		// cube-to-sphere geometry factor and is independent of this choice.
+		hrad.push_back(pRes->getVDWRadius(ai));
 		heps.push_back(pRes->getVDWEpsilon(ai));
 		hchg.push_back(pRes->getCharge(ai));
 		hres.push_back(int(resPtr.size()) - 1);
@@ -1245,10 +1258,13 @@ void protein::buildEnergyContext()
 	if (N <= 0) {return;}
 	const int numRes = int(resPtr.size());
 
-	// Exclusions, gathered per atom over a +/-1 residue window.  Both
-	// isSeparatedByFewBonds (intra-residue) and
-	// isSeparatedByThreeBackboneBonds (inter-residue, three backbone bonds)
-	// are bounded by that window, so nothing outside it can be excluded.
+	// Exclusions, gathered per atom over a +/-1 residue window.  The window is
+	// sufficient for backbone connectivity, but NOT for covalent cross-links:
+	// a disulfide joins two cysteines that are arbitrarily far apart in
+	// sequence, and its SG-SG pair sits at ~2.0 A while the vdW Rmin for two
+	// sulfurs is 4.0 A.  Left in the nonbonded sum that single pair contributes
+	// on the order of 1e3 kcal/mol through the r^-12 term.  Cross-links are
+	// therefore handled by a separate geometric pass after this loop.
 	const int WINDOW = 1;
 	vector< vector<int> > excl(N);
 	for (int ri = 0; ri < numRes; ri++)
@@ -1276,6 +1292,56 @@ void protein::buildEnergyContext()
 				}
 			}
 		}
+	}
+
+	// Covalent cross-links (disulfides), found geometrically.
+	//
+	// residue::isSeparatedByThreeBackboneBonds does contain a disulfide rule,
+	// but it only fires for residues typed CYX/CXD, and it is only consulted
+	// inside the sequence window above.  Structures loaded straight from a PDB
+	// commonly keep bonded cysteines typed as reduced CYS -- crambin's three
+	// disulfides do, hydrogens and all -- so neither guard catches them.
+	// Testing the SG-SG distance directly is independent of residue typing and
+	// of sequence separation, which is what makes it reliable here.
+	//
+	// A real disulfide is ~2.05 A; 2.5 A is comfortably above that and well
+	// below the ~3.5 A of a non-bonded sulfur contact.  Both the 1-2 pair
+	// (SG-SG') and the 1-3 pairs (SG-CB', CB-SG') are removed, matching the
+	// bonded-exclusion set used across the backbone.
+	{
+		vector<int> sgAtom, sgRes;
+		for (int i = 0; i < N; i++)
+		{
+			if (resPtr[hres[i]]->getAtom(atomLocalIndex[i])->getName() == "SG")
+			{ sgAtom.push_back(i); sgRes.push_back(hres[i]); }
+		}
+		int numLinks = 0;
+		for (UInt a = 0; a < sgAtom.size(); a++)
+		{
+			for (UInt b = a + 1; b < sgAtom.size(); b++)
+			{
+				int i = sgAtom[a], j = sgAtom[b];
+				if (sgRes[a] == sgRes[b]) {continue;}
+				dblVec ci = resPtr[hres[i]]->getAtom(atomLocalIndex[i])->getCoords();
+				dblVec cj = resPtr[hres[j]]->getAtom(atomLocalIndex[j])->getCoords();
+				double dx = ci[0]-cj[0], dy = ci[1]-cj[1], dz = ci[2]-cj[2];
+				if (dx*dx + dy*dy + dz*dz > 2.5 * 2.5) {continue;}
+				numLinks++;
+				addExclusionPair(excl, i, j);
+				// 1-3: each sulfur against the partner's CB.
+				for (int side = 0; side < 2; side++)
+				{
+					int sSelf = side ? j : i, rOther = side ? sgRes[a] : sgRes[b];
+					for (int k = 0; k < resNumAtoms[rOther]; k++)
+					{
+						int o = resFirstAtom[rOther] + k;
+						if (resPtr[hres[o]]->getAtom(atomLocalIndex[o])->getName() == "CB")
+						{ addExclusionPair(excl, sSelf, o); }
+					}
+				}
+			}
+		}
+		itsDisulfideCount = numLinks;
 	}
 
 	// Pack into the fixed-stride form the kernel reads.
