@@ -1703,9 +1703,30 @@ int protein::maxRotationGroupCount() const
 // one chain by one step, and the resulting move is a biased proposal with no
 // compensating acceptance term, so the chain no longer samples the Boltzmann
 // distribution. K replicas spend the same K evaluations to advance K chains by
-// one step each, every proposal is drawn from a symmetric kernel and tested on
-// its own, and the batch cost is identical because per-candidate cost is flat
-// out to K ~ 64 on this hardware.
+// one step each, and every proposal is drawn from a symmetric kernel and tested
+// on its own.
+//
+// What that argument does NOT buy is speed of minimisation, and an early
+// version of this comment claimed it did, on the grounds that per-candidate
+// cost is flat out to K ~ 64. Flat per-candidate cost is not zero marginal wall
+// cost. On 1ubq a single evaluation is 8.8 ms while a 64-batch is 38 ms, so the
+// batch delivers 64 candidates for 4.3x the wall time -- excellent throughput,
+// but it also means one chain advances 4.3x more slowly in wall-clock terms
+// than it would alone. Breadth has to be worth more than 4.3x to pay for
+// itself, and for driving a single structure downhill it is not.
+//
+// Measured on 1ubq at a fixed ~50 s budget, replicas against sweeps-per-chain:
+//
+//     P=1  -1223 | P=2  -1213 | P=4  -1215 | P=8  -1191
+//     P=16 -1180 | P=32 -1158 | P=64 -1090 | P=128 -1019
+//
+// Monotone in depth, with no interior optimum. P=4 is the efficiency point,
+// reaching -1215 in 28 s. For reference the pre-batching single-candidate path
+// using randContinuousSidechainConformation reaches -1158 in 47 s, so P=4 beats
+// it by 57 kcal/mol in 60% of the wall time -- but P=64, the original default
+// here, loses to it badly. Callers minimising a structure should pass a small
+// P. Large P remains the right choice for sampling an ensemble, which is a
+// different objective and is not what this routine is usually asked for.
 //
 // Two deliberate departures from randContinuousSidechainConformation:
 //
@@ -1727,6 +1748,12 @@ int protein::maxRotationGroupCount() const
 //   are instead a discrete +/-120 degree jump, which lands directly in an
 //   adjacent well without traversing the barrier. Both components are symmetric
 //   proposals, so Metropolis remains valid with no Hastings correction.
+//
+//   Measured, this component does not currently earn its keep: at a matched
+//   budget, hop fractions of 0 and 0.20 are indistinguishable on 1crn (-489.2
+//   vs -490.8) and 0.20 is slightly worse on 1ubq. The reasoning above is
+//   sound but 20% is untuned, and it may simply be spending too many proposals
+//   on jumps that land in occupied space. PROTCAD_MC_HOP exists to test it.
 void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 {
 	saveCurrentState();

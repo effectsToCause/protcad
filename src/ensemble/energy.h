@@ -352,6 +352,12 @@ int energyComputeBatch(energyContext* ctx, int nCand,
 // for search efficiency rather than for speed: best-of-K spends K evaluations
 // to advance one chain by a single step, while K replicas spend the same K
 // evaluations to advance K chains by one step each.  The GPU cost is identical.
+// Note that "identical GPU cost" means identical to best-of-K at the same K --
+// not free.  A 64-batch on 1ubq costs 4.3x the wall time of a single evaluation,
+// so a given chain advances 4.3x more slowly than it would running alone.  For
+// minimisation that trade is a loss: measured energy at a fixed budget is
+// monotone in sweeps-per-chain, and small K wins.  See the comment on
+// protMinReplicaCU in protein.cc for the numbers.
 //
 // Best-of-K followed by a Metropolis test is also not a valid sampler -- the
 // proposal is biased toward low energy and the acceptance carries no
