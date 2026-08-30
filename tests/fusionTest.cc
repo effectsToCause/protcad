@@ -20,6 +20,29 @@
 // walker that reaches it is captured.  A finite barrier is nearly as bad: a
 // finite-temperature walk tunnels through it eventually.
 //
+// Two things this scan must not do, both of which it originally did.
+//
+// It must not flag the attractive branch.  Down to the minimum of the total the
+// energy is *supposed* to fall on approach; that is what makes it a bound pair,
+// not a fusion channel.  Note that r = R_i + R_j is the LJ minimum itself, not
+// the onset of repulsion, and Coulomb attraction shifts the minimum of the
+// total further in still, so "inside contact" is the wrong gate and a scan grid
+// that straddles the minimum will trip it.  The property that actually matters
+// is single-basin: from the minimum of the total, inward, the energy must rise
+// all the way.  That is what is checked.
+//
+// It must not scan inside energyParams::minSeparation.  The kernel pins the
+// pair distance at that floor to keep 1/r finite, so within it the scanned
+// pair contributes a constant while the moving atom still recedes from its
+// other neighbours.  The total therefore falls for a purely geometric reason
+// and monotonicity in r is not even defined there.  The floor is where the
+// model stops making a statement, so it is where the scan stops.
+//
+// Finally, a drop is only interesting if a walker could reach it.  Metropolis
+// acceptance is exp(-dE/kT); a channel sitting at 10^6 kcal/mol is not a
+// sampling problem at any temperature this code will ever run.  The barrier
+// that must be crossed to enter a channel is reported alongside it.
+//
 // Scanned here for the three cases that differ in sign structure:
 //   opposite charges  -- electrostatics attracts, so this is the worst case
 //   like charges      -- electrostatics repels, screening *helps* on approach
@@ -35,6 +58,53 @@
 #include <cmath>
 
 static int failures = 0;
+
+// Shared verdict for both scans.  Locates the minimum of the total over the
+// samples, then requires that the energy rise monotonically from there inward
+// to the floor.  A single basin followed by an unbroken climb is exactly the
+// statement "there is no way into fusion"; anything else is a channel, and the
+// energy at which it opens says whether a walker could ever reach it.
+static void verdict(const std::vector<double>& r, const std::vector<double>& e)
+{
+    if (r.size() < 3) { printf("  too few samples to judge\n"); ++failures; return; }
+
+    size_t imin = 0;
+    for (size_t i = 1; i < e.size(); ++i) if (e[i] < e[imin]) imin = i;
+
+    printf("  minimum of the total at r = %.2f A, E = %.4g kcal/mol\n",
+           r[imin], e[imin]);
+
+    // The minimum landing on the innermost sample is the worst case, not a
+    // pass: it means the energy never turned over and the pair is downhill all
+    // the way to the floor.  Checking only for falls *after* the minimum would
+    // silently wave this through, since there is nothing after it.
+    if (imin == e.size() - 1) {
+        printf("  ENERGY FALLS ALL THE WAY TO THE FLOOR: the total never turns"
+               " over, so there is no repulsive wall at all\n");
+        ++failures;
+        return;
+    }
+
+    int falls = 0; double firstR = 0, eAtFirst = 0, peak = 0, drop = 0;
+    for (size_t i = imin + 1; i < e.size(); ++i) {
+        if (e[i] < e[i - 1] - 1e-9) {
+            if (!falls) { firstR = r[i]; eAtFirst = e[i]; peak = e[i - 1]; }
+            drop += e[i - 1] - e[i];
+            ++falls;
+        }
+    }
+
+    if (falls) {
+        printf("  ENERGY FALLS ON APPROACH at %d separations inside the minimum,"
+               " first at r = %.2f A\n", falls, firstR);
+        printf("    E there %.3g kcal/mol, barrier to reach it %.3g kcal/mol,"
+               " cumulative drop %.4g\n", eAtFirst, peak, drop);
+        ++failures;
+    } else {
+        printf("  single basin, then monotonically repulsive to the floor:"
+               " no fusion channel\n");
+    }
+}
 
 static void scan(const char* label, double q1, double q2)
 {
@@ -56,14 +126,18 @@ static void scan(const char* label, double q1, double q2)
     energyContext* ctx = energyCreate(t, p);
     if (!ctx) { printf("  energyCreate FAILED\n"); ++failures; return; }
 
-    printf("\n%s  (q1=%+.2f q2=%+.2f, contact = %.2f A)\n",
-           label, q1, q2, rad[0] + rad[1]);
+    const double contact = rad[0] + rad[1];
+    const double floorR  = p.minSeparation;
+
+    printf("\n%s  (q1=%+.2f q2=%+.2f, contact = %.2f A, floor = %.2f A)\n",
+           label, q1, q2, contact, floorR);
     printf("  %6s %12s %12s %12s %12s %12s %14s\n",
            "r(A)", "vdw", "elec", "solvPolar", "solvNonp", "solvEntr", "total");
 
-    double prev = 0; bool havePrev = false; int nonmono = 0; double worstR = 0;
-    // Walk inward.  A physical potential must have total increasing as r falls.
-    for (double r = 4.00; r >= 0.20; r -= 0.05)
+    std::vector<double> rs, es;
+    // Walk inward, stopping at the floor: inside it the kernel pins the pair
+    // distance, so the curve there is an artefact rather than a statement.
+    for (double r = 4.00; r >= floorR; r -= 0.05)
     {
         double x[2] = { 0.0, r }, y[2] = { 0, 0 }, z[2] = { 0, 0 };
         double total = 0; energyBreakdown b;
@@ -78,18 +152,10 @@ static void scan(const char* label, double q1, double q2)
             printf("  %6.2f %12.4g %12.4g %12.4g %12.4g %12.4g %14.6g\n",
                    r, b.vdw, b.electrostatic, b.solvationPolar,
                    b.solvationNonpolar, b.solvationEntropy, total);
-        // Non-monotonic means the energy *fell* while the atoms moved closer.
-        if (havePrev && total < prev - 1e-9) { if (!nonmono) worstR = r; ++nonmono; }
-        prev = total; havePrev = true;
+        rs.push_back(r); es.push_back(total);
     }
 
-    if (nonmono) {
-        printf("  NON-MONOTONIC at %d of the scanned separations, first at r = %.2f A"
-               "  -- attractive channel into fusion\n", nonmono, worstR);
-        ++failures;
-    } else {
-        printf("  monotonically repulsive on approach: no fusion channel\n");
-    }
+    verdict(rs, es);
     energyDestroy(ctx);
 }
 
@@ -139,20 +205,22 @@ static void scanDense(const char* label, double qScale)
     energyContext* ctx = energyCreate(t, p);
     if (!ctx) { printf("  energyCreate FAILED\n"); ++failures; return; }
 
+    const double floorR = p.minSeparation;
+
     // Target is the lattice neighbour of atom 0 along +x.
     double x0 = x[0], y0 = y[0], z0 = z[0];
     double dx = x[1] - x0, dy = y[1] - y0, dz = z[1] - z0;
     double d0 = sqrt(dx*dx + dy*dy + dz*dz);
     dx /= d0; dy /= d0; dz /= d0;
 
-    printf("\n%s  (dense lattice, N=%d, start separation %.2f A, contact %.2f A)\n",
-           label, N, d0, 2 * rad[0]);
+    printf("\n%s  (dense lattice, N=%d, start separation %.2f A, contact %.2f A,"
+           " floor %.2f A)\n", label, N, d0, 2 * rad[0], floorR);
     printf("  %6s %12s %12s %12s %12s %12s %14s\n",
            "r(A)", "vdw", "elec", "solvPolar", "solvNonp", "solvEntr", "total");
 
-    double prev = 0, sp0 = 0, snp0 = 0, se0 = 0;
-    bool havePrev = false; int nonmono = 0; double worstR = 0, drop = 0;
-    for (double r = d0; r >= 0.30; r -= 0.05)
+    double sp0 = 0, snp0 = 0, se0 = 0; bool havePrev = false;
+    std::vector<double> rs, es;
+    for (double r = d0; r >= floorR; r -= 0.05)
     {
         x[0] = x[1] - dx * r; y[0] = y[1] - dy * r; z[0] = z[1] - dz * r;
         double total = 0; energyBreakdown b;
@@ -167,16 +235,12 @@ static void scanDense(const char* label, double qScale)
             printf("  %6.2f %12.4g %12.4g %12.4g %12.4g %12.4g %14.6g\n",
                    r, b.vdw, b.electrostatic, b.solvationPolar,
                    b.solvationNonpolar, b.solvationEntropy, total);
-        // Only overlap matters here; the LJ well outside contact is physical.
-        if (havePrev && r < 2 * rad[0] && total < prev - 1e-9) {
-            if (!nonmono) { worstR = r; }
-            drop += prev - total; ++nonmono;
-        }
-        prev = total; havePrev = true;
+        rs.push_back(r); es.push_back(total);
+        havePrev = true;
     }
     // Did the dielectric machinery respond at all?
     double total = 0; energyBreakdown b;
-    x[0] = x[1] - dx * 0.30; y[0] = y[1] - dy * 0.30; z[0] = z[1] - dz * 0.30;
+    x[0] = x[1] - dx * floorR; y[0] = y[1] - dy * floorR; z[0] = z[1] - dz * floorR;
     energyCompute(ctx, &x[0], &y[0], &z[0], &total, &b);
     printf("  solvation response over the scan: polar %+.4g  nonpolar %+.4g  entropy %+.4g\n",
            b.solvationPolar - sp0, b.solvationNonpolar - snp0, b.solvationEntropy - se0);
@@ -184,13 +248,7 @@ static void scanDense(const char* label, double qScale)
       + fabs(b.solvationEntropy - se0) < 1e-9)
         printf("  WARNING: solvation still frozen -- this scan did not probe the channel\n");
 
-    if (nonmono) {
-        printf("  ENERGY FALLS ON APPROACH inside contact at %d separations,"
-               " first at r = %.2f A, cumulative drop %.4g\n", nonmono, worstR, drop);
-        ++failures;
-    } else {
-        printf("  monotonically repulsive inside contact: no fusion channel\n");
-    }
+    verdict(rs, es);
     energyDestroy(ctx);
 }
 

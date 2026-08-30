@@ -103,7 +103,8 @@ if(PROTCAD_BUILD_TESTS)
     enable_testing()
 
     # Self-contained: they build their own inputs and exit nonzero on failure.
-    set(PROTCAD_SELF_TESTS amberParamsTest batchTest bestfitTest energyTest replicaTest)
+    set(PROTCAD_SELF_TESTS amberParamsTest batchTest bestfitTest energyTest
+                           fusionTest replicaTest)
     # Need a structure argument.
     set(PROTCAD_PDB_TESTS clashCheck energyTerms rotamerTest)
 
@@ -121,9 +122,6 @@ if(PROTCAD_BUILD_TESTS)
         endif()
         # Anything not listed above is a benchmark or a diagnostic with no
         # pass/fail contract, so it is built but not registered with ctest.
-        # fusionTest is the notable one: it currently reports a real defect in
-        # the potential rather than a regression, so registering it would just
-        # leave the suite permanently red.
     endforeach()
 
     # protcad resolves its data files relative to PROTCADDIR.

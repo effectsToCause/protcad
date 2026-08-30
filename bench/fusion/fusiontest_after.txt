@@ -1,0 +1,69 @@
+fusionTest: short-range monotonicity of the total energy
+
+opposite charges  (q1=+0.85 q2=-0.85, contact = 3.57 A, floor = 0.80 A)
+    r(A)          vdw         elec    solvPolar     solvNonp     solvEntr          total
+    4.00      -0.1144      -0.7842       -8.313       -2.679        7.271       -4.62021
+    2.50        8.302       -1.255       -8.313       -2.679        7.271        3.32562
+    2.45        10.95        -1.28       -8.313       -2.679        7.271        5.95106
+    2.00        148.4       -1.568       -8.313       -2.679        7.271        143.082
+    1.95        202.9       -1.609       -8.313       -2.679        7.271        197.586
+    1.50         4938       -2.091       -8.313       -2.679        7.271        4932.31
+    1.45         7432       -2.163       -8.313       -2.679        7.271        7426.54
+    1.00    6.472e+05       -3.137       -8.313       -2.679        7.271         647208
+    0.95    1.198e+06       -3.302       -8.313       -2.679        7.271    1.19805e+06
+  minimum of the total at r = 3.40 A, E = -4.778 kcal/mol
+  single basin, then monotonically repulsive to the floor: no fusion channel
+
+like charges  (q1=+0.85 q2=+0.85, contact = 3.57 A, floor = 0.80 A)
+    r(A)          vdw         elec    solvPolar     solvNonp     solvEntr          total
+    4.00      -0.1144       0.7842       -8.313       -2.679        7.271       -3.05187
+    2.50        8.302        1.255       -8.313       -2.679        7.271        5.83496
+    2.45        10.95         1.28       -8.313       -2.679        7.271        8.51161
+    2.00        148.4        1.568       -8.313       -2.679        7.271        146.219
+    1.95        202.9        1.609       -8.313       -2.679        7.271        200.803
+    1.50         4938        2.091       -8.313       -2.679        7.271        4936.49
+    1.45         7432        2.163       -8.313       -2.679        7.271        7430.86
+    1.00    6.472e+05        3.137       -8.313       -2.679        7.271         647214
+    0.95    1.198e+06        3.302       -8.313       -2.679        7.271    1.19805e+06
+  minimum of the total at r = 4.00 A, E = -3.052 kcal/mol
+  single basin, then monotonically repulsive to the floor: no fusion channel
+
+neutral  (q1=+0.00 q2=+0.00, contact = 3.57 A, floor = 0.80 A)
+    r(A)          vdw         elec    solvPolar     solvNonp     solvEntr          total
+    4.00      -0.1144            0            0       -2.679        7.271         4.4772
+    2.50        8.302            0            0       -2.679        7.271        12.8935
+    2.45        10.95            0            0       -2.679        7.271        15.5446
+    2.00        148.4            0            0       -2.679        7.271        152.964
+    1.95        202.9            0            0       -2.679        7.271        207.508
+    1.50         4938            0            0       -2.679        7.271        4942.71
+    1.45         7432            0            0       -2.679        7.271        7437.01
+    1.00    6.472e+05            0            0       -2.679        7.271         647220
+    0.95    1.198e+06            0            0       -2.679        7.271    1.19806e+06
+  minimum of the total at r = 3.55 A, E = 4.44 kcal/mol
+  single basin, then monotonically repulsive to the floor: no fusion channel
+
+dense, charged  (dense lattice, N=64, start separation 3.14 A, contact 3.60 A, floor 0.80 A)
+    r(A)          vdw         elec    solvPolar     solvNonp     solvEntr          total
+    3.14       -18.25        7.199       -90.95       -63.14        193.2        28.0507
+    2.99       -17.95        7.132       -90.95       -63.13        193.2        28.2649
+    2.49        -10.5        6.913       -90.95       -63.11        193.1          35.46
+    1.99        123.4        6.651       -90.95       -63.09          193        169.041
+    1.49         4813        6.299       -90.95       -63.07          193        4858.47
+    0.99    6.679e+05        5.759       -90.94       -63.05        192.9         667896
+  solvation response over the scan: polar +0.004219  nonpolar +0.0932  entropy -0.2852
+  minimum of the total at r = 3.14 A, E = 28.05 kcal/mol
+  single basin, then monotonically repulsive to the floor: no fusion channel
+
+dense, neutral  (dense lattice, N=64, start separation 3.14 A, contact 3.60 A, floor 0.80 A)
+    r(A)          vdw         elec    solvPolar     solvNonp     solvEntr          total
+    3.14       -18.25            0            0       -63.14        193.2        111.801
+    2.99       -17.95            0            0       -63.13        193.2        112.081
+    2.49        -10.5            0            0       -63.11        193.1        119.494
+    1.99        123.4            0            0       -63.09          193        253.337
+    1.49         4813            0            0       -63.07          193        4943.12
+    0.99    6.679e+05            0            0       -63.05        192.9         667981
+  solvation response over the scan: polar +0  nonpolar +0.0932  entropy -0.2852
+  minimum of the total at r = 3.14 A, E = 111.8 kcal/mol
+  single basin, then monotonically repulsive to the floor: no fusion channel
+
+RESULT: no fusion channel (0 failures)

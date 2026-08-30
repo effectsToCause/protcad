@@ -1,0 +1,14 @@
+Does the fusion channel track the minSeparation clamp?
+
+charged lattice:
+  minSep 0.80 A : channel  first fall at r = 0.79 A (inside minSep), E there = 8.27e+06 kcal/mol, drop 0.08188
+  minSep 0.60 A : channel  first fall at r = 0.59 A (inside minSep), E there = 2.61e+08 kcal/mol, drop 0.05536
+  minSep 0.40 A : channel  first fall at r = 0.39 A (inside minSep), E there = 3.39e+10 kcal/mol, drop 0.03164
+  minSep 0.20 A : channel  first fall at r = 0.15 A (inside minSep), E there = 1.39e+14 kcal/mol, drop 0.03125
+  minSep 0.10 A : none   
+  minSep 0.05 A : none   
+
+neutral lattice:
+  minSep 0.80 A : none   
+  minSep 0.40 A : none   
+  minSep 0.10 A : none   
