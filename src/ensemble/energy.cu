@@ -473,6 +473,7 @@ __global__ void kTorsion(const ereal* __restrict__ x,
                          const ereal* __restrict__ tBarrier,
                          const ereal* __restrict__ tPhase,
                          const ereal* __restrict__ tPeriod,
+                         const unsigned char* __restrict__ silent,
                          ereal scale,
                          ereal* __restrict__ out)
 {
@@ -486,6 +487,17 @@ __global__ void kTorsion(const ereal* __restrict__ x,
 
     int ia = tAtoms[4 * t + 0], ib = tAtoms[4 * t + 1];
     int ic = tAtoms[4 * t + 2], id = tAtoms[4 * t + 3];
+
+    // A silent atom is excluded from *all* energy terms, which has to include
+    // the bonded ones: a torsion is a property of its four atoms jointly, so
+    // if any of them is masked out the term has no owner left.  Without this
+    // the mask silently left the entire torsion energy in place -- on a
+    // two-chain system that was ~1036 of a ~1036 kcal/mol total, so an
+    // "isolated chain" energy came back as the whole complex.
+    if (silent && (silent[ia] || silent[ib] || silent[ic] || silent[id])) {
+        out[(size_t)k * nTor + t] = ereal(0);
+        return;
+    }
 
     // b1 x b2 and b2 x b3 give the two half-plane normals; the torsion is the
     // angle between them, signed by b2.  Using atan2 of (n1 x n2).b2hat and
@@ -1612,7 +1624,7 @@ static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
     dim3 g((nTor + 255) / 256, nCand);
     kTorsion<<<g, 256>>>(x, y, z, ctx->N, nCand, nTor,
                          ctx->d_torAtoms, ctx->d_torBarrier,
-                         ctx->d_torPhase, ctx->d_torPeriod,
+                         ctx->d_torPhase, ctx->d_torPeriod, ctx->d_silent,
                          ereal(ctx->p.torsionScale), ctx->d_torE);
     CUDA_OK(ctx, cudaPeekAtLastError());
     CUDA_OK(ctx, cudaMemcpy(&ctx->h_torE[0], ctx->d_torE,
