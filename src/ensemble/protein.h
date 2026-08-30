@@ -232,6 +232,23 @@ public:
 	// validation and ablation; call freeDeviceMemAll() first to force a rebuild.
 	void setEnergyParamsOverride(const energyParams& _p);
 	int updateDeviceCoords();
+	// Register sidechain rotation groups with the energy context so candidate
+	// conformations are generated on the device. Returns the number of groups.
+	int buildRotationGroups();
+	// Push current atom coordinates to the device and make them resident.
+	int syncDeviceCoords();
+	int getBatchCoords(int _k, double* _x, double* _y, double* _z);
+	// Generate and evaluate nCand candidates entirely on the device.
+	int energyRotamerBatch(int _nCand, int _groupBegin, int _nGroups,
+	                       const double* _anglesDeg, double* _totals);
+	// First group index and chi count for a residue, valid after
+	// buildRotationGroups(). Returns false if the residue has no chis.
+	bool getRotationGroupRange(UInt _chainIndex, UInt _resIndex, int &_begin, int &_count) const;
+	// Evaluate K random sidechain conformations for one residue in a single
+	// batched GPU launch and return the best. bestConf receives the winning
+	// dihedral set; the protein is left in its original conformation.
+	double bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt _numCandidates,
+	                                vector < vector <double> > &_bestConf);
 	bool protEnergyBreakdownCU(energyBreakdown& _out);
 	// Number of disulfide cross-links removed from the nonbonded sum.
 	int getDisulfideCount() const {return itsDisulfideCount;}
@@ -357,6 +374,8 @@ private:
 	energyParams itsEnergyParams;
 	bool itsEnergyParamsSet = false;
 	std::vector<double> itsCoordX, itsCoordY, itsCoordZ;
+	std::vector<int> itsRotGroupFirst, itsRotGroupCount;   // per residue, walk order
+	std::vector< std::vector<int> > itsResRotIndex;        // [chain][resInChain] -> walk index
 	double E;
 	int clash;
 	bool deviceMemLoadedEnergy = false;
