@@ -177,7 +177,8 @@ energyParams defaultEnergyParams()
     p.useSwitching  = 1;
     p.minSeparation = ereal(0.8);
 
-    p.bornNormalize    = 0;   // preserves the existing energy scale; see notes
+    p.bornNormalize    = 1;
+    p.bornReferenceCapacity = ereal(8.644);
     p.eSolvationFactor = ereal(1.0);
     p.hSolvationFactor = ereal(1.0);
     p.entropyFactor    = ereal(1.0);
@@ -185,7 +186,11 @@ energyParams defaultEnergyParams()
     p.vdwScale  = ereal(1.0);
     p.elecScale = ereal(1.0);
 
-    p.clash = CLASH_INSCRIBED_CUBE;
+    // Isotropic hard-clash test.  The legacy cube criterion is retained as
+    // CLASH_INSCRIBED_CUBE for CPU-parity checks, but it is orientation
+    // dependent and so unusable as a physical quantity; see energy.h.
+    p.clash          = CLASH_SPHERE;
+    p.clashTolerance = 0.905;
 
     p.exclusionResidueSpan = 2;
     return p;
@@ -200,8 +205,9 @@ energyParams legacyEnergyParams()
     p.quantizeWaters = 1;
     p.useSwitching   = 0;
     p.minSeparation  = ereal(1e-6);
-    p.bornNormalize  = 0;
+    p.bornNormalize  = 0;   // legacy scales the Born term by the raw water count
     p.clash          = CLASH_SPHERE;
+    p.clashTolerance = 1.0;   // legacy GPU flagged any pair inside rI+rJ
     return p;
 }
 
@@ -664,7 +670,9 @@ __global__ void kEnergy(int nTiles,
     if (w > ereal(0))
     {
         ereal bornDenom = (ri + p.waterRadius) * si.eps;
-        ereal wPolar = p.bornNormalize ? (w / si.capacity) : w;
+        ereal wPolar = p.bornNormalize
+                     ? (w / si.capacity) * ereal(p.bornReferenceCapacity)
+                     : w;
         eSolvP[s] = p.eSolvationFactor *
                     (-(c_kc * ereal(0.5)) * qi * qi / bornDenom) * wPolar;
 
@@ -683,6 +691,30 @@ __global__ void kEnergy(int nTiles,
 }
 
 // ---------------------------------------------------------------------------
+// Shell state export
+// ---------------------------------------------------------------------------
+
+// Export the per-atom local dielectric and shell water count.  This reads the
+// same occupancy field and the same shellFromOcclusion() helper the energy pass
+// uses, so an exported dielectric can never disagree with the one the energy
+// was computed with.
+__global__ void kShellExport(int nTiles,
+                             const ereal* __restrict__ srad,
+                             const unsigned char* __restrict__ ssilent,
+                             const ereal* __restrict__ occ,
+                             energyParams p, ereal v43,
+                             ereal* __restrict__ outEps,
+                             ereal* __restrict__ outWaters)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nTiles * TILE) return;
+    if (ssilent[s]) { outEps[s] = ereal(0); outWaters[s] = ereal(0); return; }
+    shellState st = shellFromOcclusion(occ[s], srad[s], p, v43);
+    outEps[s]    = st.eps;
+    outWaters[s] = st.waters;
+}
+
+// ---------------------------------------------------------------------------
 // Clash counting
 // ---------------------------------------------------------------------------
 
@@ -698,7 +730,7 @@ __global__ void kClash(int nTiles,
                        const ereal* __restrict__ tileHi,
                        const int* __restrict__ exclCount,
                        const int* __restrict__ exclList, int exclStride,
-                       int span, int clashMode, ereal maxRadSum,
+                       int span, int clashMode, ereal clashTol, ereal maxRadSum,
                        int* __restrict__ clashOut)
 {
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK], shR[BLOCK];
@@ -741,7 +773,7 @@ __global__ void kClash(int nTiles,
             {
                 // Count each unordered pair once, using the original atom index
                 // so the result does not depend on the spatial sort.
-                if (shOrig[base + k] <= origI) continue;
+                if (shOrig[base + k] == origI) continue;   // no self pair
 
                 ereal dx = xi - shX[base + k];
                 ereal dy = yi - shY[base + k];
@@ -755,7 +787,8 @@ __global__ void kClash(int nTiles,
                     ereal c = rsum * ereal(0.7071067811865476);
                     hit = (eabs(dx) < c) && (eabs(dy) < c) && (eabs(dz) < c);
                 } else {
-                    hit = (dx * dx + dy * dy + dz * dz) < rsum * rsum;
+                    ereal t = rsum * clashTol;
+                    hit = (dx * dx + dy * dy + dz * dz) < t * t;
                 }
                 if (!hit) continue;
 
@@ -1027,9 +1060,10 @@ static int buildOrder(energyContext* ctx,
 // Host: energy
 // ---------------------------------------------------------------------------
 
-int energyCompute(energyContext* ctx,
-                  const double* x, const double* y, const double* z,
-                  double* totalOut, energyBreakdown* breakdown)
+static int energyComputeImpl(energyContext* ctx,
+                             const double* x, const double* y, const double* z,
+                             double* totalOut, energyBreakdown* breakdown,
+                             double* perAtomOut)
 {
     if (!ctx) return -1;
     const int nPad = ctx->nPad, nT = ctx->nTiles;
@@ -1070,6 +1104,8 @@ int energyCompute(energyContext* ctx,
     // Reduce on the host, in original atom order, with Kahan compensation.
     // Summation order is therefore independent of the spatial sort, which is
     // what makes repeated evaluations of the same conformation bit-identical.
+    if (perAtomOut) std::fill(perAtomOut, perAtomOut + ctx->N, 0.0);
+
     double out[5];
     for (int t = 0; t < 5; ++t) {
         std::fill(ctx->perAtom.begin(), ctx->perAtom.end(), 0.0);
@@ -1078,6 +1114,9 @@ int energyCompute(energyContext* ctx,
             int oi = ctx->h_order[s];
             if (oi >= 0) ctx->perAtom[oi] = double(src[s]);
         }
+        if (perAtomOut)
+            for (int i = 0; i < ctx->N; ++i) perAtomOut[i] += ctx->perAtom[i];
+
         double sum = 0.0, c = 0.0;
         for (int i = 0; i < ctx->N; ++i) {
             double yv = ctx->perAtom[i] - c;
@@ -1101,13 +1140,75 @@ int energyCompute(energyContext* ctx,
     return 0;
 }
 
+int energyCompute(energyContext* ctx,
+                  const double* x, const double* y, const double* z,
+                  double* totalOut, energyBreakdown* breakdown)
+{
+    return energyComputeImpl(ctx, x, y, z, totalOut, breakdown, 0);
+}
+
+int energyComputeAtoms(energyContext* ctx,
+                       const double* x, const double* y, const double* z,
+                       double* totalOut, energyBreakdown* breakdown,
+                       double* perAtomOut)
+{
+    return energyComputeImpl(ctx, x, y, z, totalOut, breakdown, perAtomOut);
+}
+
+// ---------------------------------------------------------------------------
+// Host: shell state
+// ---------------------------------------------------------------------------
+
+int shellCompute(energyContext* ctx,
+                 const double* x, const double* y, const double* z,
+                 double* dielectricOut, double* watersOut)
+{
+    if (!ctx) return -1;
+    const int nPad = ctx->nPad, nT = ctx->nTiles;
+
+    if (buildOrder(ctx, x, y, z) != 0) return -1;
+
+    ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
+              ? ereal(4.188) : ereal(4.1887902048);
+
+    CUDA_OK(ctx, cudaMemset(ctx->d_occ, 0, nPad * sizeof(ereal)));
+
+    int blocks = (nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    kOccupancy<<<blocks, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+                                  ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
+                                  ctx->d_tileLo, ctx->d_tileHi,
+                                  ctx->p, v43, ctx->p.occupancy, ctx->d_occ);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    // Reuse the energy term scratch; the energy pass has no live data here.
+    kShellExport<<<(nPad + 255) / 256, 256>>>(nT, ctx->d_srad, ctx->d_ssilent,
+                                              ctx->d_occ, ctx->p, v43,
+                                              ctx->d_eVdw, ctx->d_eEle);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    ereal* h = ctx->h_terms;
+    CUDA_OK(ctx, cudaMemcpy(h + 0 * nPad, ctx->d_eVdw, nPad * sizeof(ereal), cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpy(h + 1 * nPad, ctx->d_eEle, nPad * sizeof(ereal), cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpy(ctx->h_order, ctx->d_sorig, nPad * sizeof(int), cudaMemcpyDeviceToHost));
+
+    if (dielectricOut) std::fill(dielectricOut, dielectricOut + ctx->N, 0.0);
+    if (watersOut)     std::fill(watersOut,     watersOut     + ctx->N, 0.0);
+    for (int s = 0; s < nPad; ++s) {
+        int oi = ctx->h_order[s];
+        if (oi < 0) continue;
+        if (dielectricOut) dielectricOut[oi] = double(h[0 * nPad + s]);
+        if (watersOut)     watersOut[oi]     = double(h[1 * nPad + s]);
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Host: clashes
 // ---------------------------------------------------------------------------
 
-int clashCompute(energyContext* ctx,
-                 const double* x, const double* y, const double* z,
-                 int* clashCountOut)
+static int clashComputeImpl(energyContext* ctx,
+                            const double* x, const double* y, const double* z,
+                            int* clashCountOut, int* perAtomOut)
 {
     if (!ctx) return -1;
     const int nPad = ctx->nPad, nT = ctx->nTiles;
@@ -1124,7 +1225,7 @@ int clashCompute(energyContext* ctx,
                               ctx->d_tileLo, ctx->d_tileHi,
                               ctx->d_exclCount, ctx->d_exclList, ctx->exclStride,
                               ctx->p.exclusionResidueSpan, ctx->p.clash,
-                              maxRadSum, ctx->d_clash);
+                              ereal(ctx->p.clashTolerance), maxRadSum, ctx->d_clash);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     std::vector<int> counts(nPad);
@@ -1133,8 +1234,32 @@ int clashCompute(energyContext* ctx,
     CUDA_OK(ctx, cudaMemcpy(ctx->h_order, ctx->d_sorig, nPad * sizeof(int),
                             cudaMemcpyDeviceToHost));
 
+    // Every pair is recorded by both of its atoms, so the raw sum is exactly
+    // twice the number of distinct clashing pairs and is always even.
     long long total = 0;
     for (int s = 0; s < nPad; ++s) total += counts[s];
-    if (clashCountOut) *clashCountOut = int(total);
+    if (clashCountOut) *clashCountOut = int(total / 2);
+
+    if (perAtomOut) {
+        std::fill(perAtomOut, perAtomOut + ctx->N, 0);
+        for (int s = 0; s < nPad; ++s) {
+            int oi = ctx->h_order[s];
+            if (oi >= 0) perAtomOut[oi] = counts[s];
+        }
+    }
     return 0;
+}
+
+int clashCompute(energyContext* ctx,
+                 const double* x, const double* y, const double* z,
+                 int* clashCountOut)
+{
+    return clashComputeImpl(ctx, x, y, z, clashCountOut, 0);
+}
+
+int clashComputeAtoms(energyContext* ctx,
+                      const double* x, const double* y, const double* z,
+                      int* clashCountOut, int* perAtomOut)
+{
+    return clashComputeImpl(ctx, x, y, z, clashCountOut, perAtomOut);
 }

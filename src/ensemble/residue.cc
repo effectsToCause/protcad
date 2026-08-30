@@ -3039,13 +3039,13 @@ void residue::polarizability()
 					//i sum environment j
 					cutoff = itsAtoms[i]->inCutoff(itsAtoms[j], solvatedRadiusI);
 					if (cutoff){
-						itsAtoms[i]->sumEnvVol((4.188*pow(residueTemplate::getVDWRadius(vdwIndexJ),3))/2);
+						itsAtoms[i]->sumEnvVol((4.1887902048*pow(residueTemplate::getVDWRadius(vdwIndexJ),3))/2);
 					}
 
 					//j sum environment i
 					cutoff = itsAtoms[j]->inCutoff(itsAtoms[i], solvatedRadiusJ);
 					if (cutoff){
-						itsAtoms[j]->sumEnvVol((4.188*pow(residueTemplate::getVDWRadius(vdwIndexI),3))/2);
+						itsAtoms[j]->sumEnvVol((4.1887902048*pow(residueTemplate::getVDWRadius(vdwIndexI),3))/2);
 					}
 				}
 			}
@@ -3074,13 +3074,13 @@ void residue::polarizability(residue* _other)
 					//i sum environment j
 					cutoff = itsAtoms[i]->inCutoff(_other->itsAtoms[j], solvatedRadiusI);
 					if (resI && cutoff){
-						itsAtoms[i]->sumEnvVol((4.188*pow(residueTemplate::getVDWRadius(vdwIndexJ),3))/2);
+						itsAtoms[i]->sumEnvVol((4.1887902048*pow(residueTemplate::getVDWRadius(vdwIndexJ),3))/2);
 					}
 
 					//j sum environment i
 					cutoff = _other->itsAtoms[j]->inCutoff(itsAtoms[i], solvatedRadiusJ);
 					if (resJ && cutoff){
-						_other->itsAtoms[j]->sumEnvVol((4.188*pow(residueTemplate::getVDWRadius(vdwIndexI),3))/2);
+						_other->itsAtoms[j]->sumEnvVol((4.1887902048*pow(residueTemplate::getVDWRadius(vdwIndexI),3))/2);
 					}
 				}
 			}
@@ -3091,9 +3091,10 @@ void residue::polarizability(residue* _other)
 void residue::calculateDielectrics()
 {
 	double envVol, totalWaterVol, dielectric, waters;
-	double waterPol = 1.47;   //polarizability of water (Murphy WF. J. Chem. Phys. 1977;67:5877–5882)
 	double waterVol = 107.31; //effective volume of water (4/3*pi*effectiveWaterDiameter^3)
-	double pol, vol, solvatedRadius;
+	double epsProtein = 2.0;  //dielectric of the protein interior
+	double epsWater = 78.4;   //dielectric of bulk water at 300K
+	double vol, solvatedRadius;
 	UInt vdwIndexI;
 	for(UInt i=0; i<itsAtoms.size(); i++)
 	{
@@ -3102,15 +3103,42 @@ void residue::calculateDielectrics()
 			// calculate local dielectric for atom
 			vdwIndexI = dataBase[itsType].itsAtomEnergyTypeDefinitions[i][0];
 			solvatedRadius = residueTemplate::getVDWRadius(vdwIndexI)+effectiveWaterDiameter;
-			vol = 4.188*pow(solvatedRadius,3); pol=0.0; waters=0.0;
+			vol = 4.1887902048*pow(solvatedRadius,3); waters=0.0;
 			envVol = itsAtoms[i]->getEnvVol();
 			totalWaterVol = vol-envVol;
-			if (totalWaterVol > 0){
-				waters = int(totalWaterVol/waterVol); pol = waters*waterPol;
-			}
-			// Solve for the effective dielectric with the Lorentz local field correction
-			dielectric =2+(8*PI/3)*(pol)/1-(4*PI/3)*(pol);
-			//cout << vol << " " << envVol << " " << dielectric << endl;
+			if (totalWaterVol < 0.0){totalWaterVol = 0.0;}
+			if (totalWaterVol > vol){totalWaterVol = vol;}
+			waters = totalWaterVol/waterVol;
+
+			// Effective dielectric of the hydration shell, interpolated between
+			// the protein interior and bulk water by the fraction of the shell
+			// that solvent can actually occupy.
+			//
+			// This replaces
+			//
+			//     dielectric = 2+(8*PI/3)*(pol)/1-(4*PI/3)*(pol);
+			//
+			// which was labelled a Lorentz local field correction but was not
+			// one.  Under C operator precedence the "/1" is inert, so the two
+			// polarizability terms combined into the single linear expression
+			// 2 + (4*PI/3)*pol; the intended Clausius-Mossotti denominator never
+			// took effect.  Restoring that denominator is not the fix either:
+			// at the water polarizability used here, 1-(4*PI/3)*pol goes
+			// negative and the dielectric turns negative with it, and even a
+			// dimensionally consistent Clausius-Mossotti form yields about 1.8
+			// for bulk water -- the optical constant n^2.  Clausius-Mossotti
+			// only captures electronic polarizability, whereas the 78.4 of
+			// liquid water is overwhelmingly orientational and needs an Onsager
+			// or Kirkwood-Frohlich treatment.
+			//
+			// The occupancy interpolation below keeps the shape the model was
+			// calibrated around, has the correct limits (buried -> 2,
+			// fully exposed -> 78.4), and claims no mechanism it does not have.
+			// It matches DIELECTRIC_OCCUPANCY in energy.cu; the original
+			// expression is preserved there as DIELECTRIC_LEGACY_LINEAR.
+			double occupiedFraction = totalWaterVol/vol;
+			dielectric = epsProtein + (epsWater-epsProtein)*occupiedFraction;
+
 			itsAtoms[i]->setDielectric(dielectric);
 			itsAtoms[i]->setNumberofWaters(waters);
 		}
@@ -4477,6 +4505,7 @@ void residue::clearEnvironment()
 void residue::setClashes(UInt _clashes)
 {
 	clashes = _clashes;
+	if (_clashes == 0) intraClashes = 0;
 }
 
 void residue::sumClashes(UInt _clashes)
