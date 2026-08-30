@@ -37,7 +37,7 @@ Then follow the Ubuntu Linux install dependency instructions and install below i
 
 In terminal:
 
-sudo apt install g++ gfortran git
+sudo apt install g++ gfortran git cmake
 
 For automatic cuda support you will also need:
 
@@ -51,7 +51,7 @@ xcode-select --install
 
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-brew install gcc gfortran git
+brew install gcc gfortran git cmake
 
 
 === Install
@@ -62,18 +62,25 @@ git clone https://github.com/protCAD/protcad
 
 cd protcad
 
-make install
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-Then close and re-open the terminal
+cmake --build build -j
+
+CUDA and its kernels are picked up automatically when nvcc is present, and the
+build falls back to the CPU-only path when it is not.  Binaries are written to
+protcad/bin.  Add that directory to your PATH, then close and re-open the
+terminal:
+
+echo "export PROTCADDIR=$PWD" >> ~/.bashrc
+
+echo "export PATH=\$PATH:$PWD/bin" >> ~/.bashrc
 
 
  Usage
 ===================================================================================================
 
-General use programs are compiled via make install and the source is available in protcad/projects.
-
-Since make install also adds the bin directory to your path, programs in projects are immediately 
-available to run in any directory.
+Every source file in protcad/projects is compiled to a program of the same name in protcad/bin,
+and once that directory is on your PATH they are available to run from anywhere.
 
 An overview of the general use programs are described below:
 
@@ -212,12 +219,17 @@ Backbone Classification Key:   m  c  l  p  b t y a i g  n   d   q   r   f  h  w 
  Development process
 ===================================================================================================
 
-New programs need to be added to the Makefile in protcad/ for compilation and added to projects 
-directory which then can be compiled via 'make programx'.
+New programs are added by dropping a source file into the projects directory.  The build
+discovers it, so nothing needs editing; re-run 'cmake --build build' and a binary of the same
+name appears in bin.  The same applies to the tests directory.
 
-Additional examples are in the protcad/src/tests folder for reference and usage, which can be added
-to the projects directory and MakeFile for compilation.  Some tests may not compile as they were 
-developed on a much earlier version of protcad but most will compile without issue.
+Tests are run with 'ctest --test-dir build'.  Note that the diagnostic binaries which have no
+pass/fail contract, such as energyBench and fusionTest, are built but deliberately not
+registered with ctest.
+
+The programs already in protcad/projects are the best reference for usage.  An archive of
+one-off scratch programs written against much older versions of protcad was removed in the
+cleanup; recover it from git history at tag `archive/src-tests` if something in there is needed.
 
 New programs written are intended to follow the same directory structure and compilation as 
 in projects.  Developers work in their own trees, then submit pull requests when they think 
@@ -230,7 +242,7 @@ The dev branch is a more frequently updated branch with a more experimental vers
 but generally ready for usage. To switch to the dev branch in the protad directory use the command:
 
 git checkout dev
-make install
+cmake --build build -j
 
 
  Issues
