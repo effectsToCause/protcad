@@ -54,14 +54,14 @@ int main (int argc, char* argv[])
 		UInt startclashes = _prot->getNumClashesCU();
 		cout << "Starting Clashes: " << startclashes << " Starting Energy: " << startCE << endl;
 		cout << "clearing clashes..." << endl;
-		_prot->protRelaxCU(1000, backbone);
+		_prot->protRelaxCU(5, backbone);
 		UInt endclashes = _prot->getNumClashesCU();
 		double endCE = _prot->protEnergyCU();
 		cout << "Clashes cleared: " << (int)startclashes-(int)endclashes << " Ending Energy: " << endCE << endl;
 #else
 		UInt startclashes = _prot->getNumHardClashes();
 		cout << "Starting Clashes: " << startclashes << endl;
-		_prot->protRelax(1000, backbone);
+		_prot->protRelax(5, backbone);
 		UInt endclashes = _prot->getNumHardClashes();
 		cout << "Clashes cleared: " << (int)startclashes-(int)endclashes << endl;
 #endif

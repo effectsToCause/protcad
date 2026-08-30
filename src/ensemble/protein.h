@@ -139,7 +139,7 @@ public:
 	
 	//--Optimization functions
 	void protSampling(UInt iterations);
-	void protRelax(UInt _plateau, bool _backbone);
+	void protRelax(UInt _sweeps, bool _backbone);
 	void protRelax(UIntVec _frozenResidues, UIntVec _activeChains);
 	void cofactorRelax(UInt _plateau);
 	void protMin(bool _backbone);
@@ -258,10 +258,15 @@ public:
 	void protMinReplicaCU(UInt _sweeps, UInt _nReplicas);
 	// Number of disulfide cross-links removed from the nonbonded sum.
 	int getDisulfideCount() const {return itsDisulfideCount;}
-	void protRelaxCU(UInt _plateau, bool _backbone);
+	// Randomized-order sweeps of energy-based steepest descent over sidechain
+	// torsions. Same objective and same GPU path as protMinCU, but bounded by a
+	// sweep count instead of a Metropolis plateau, so it is cheap enough to run
+	// after every mutation. Returns the final energy.
+	double relaxSidechainsCU(UIntVec _frozenResidues, UIntVec _activeChains, UInt _maxSweeps);
+	void protRelaxCU(UInt _sweeps, bool _backbone);
 	void protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains);
-	void protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains);
-	void protMinCU(bool _backbone);
+	void protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains, UInt _plateau = 1000);
+	void protMinCU(bool _backbone, UInt _plateau = 1000);
 
 	//--Transformation functions
 	double getBetaChi(UInt _chainIndex, UInt _residueIndex) {return itsChains[_chainIndex]->getBetaChi(_residueIndex); }

@@ -111,7 +111,7 @@ int main (int argc, char* argv[])
 			prot->activateForRepacking(activeChain, resIndex);
 			prot->mutateWBC(activeChain, resIndex, seqs[i][j]);
 		}
-		prot->protRelax(1000, false);
+		prot->protRelax(5, false);
 		stringstream convert; string countstr;
 		convert << i+1, countstr = convert.str();
 		string outFile = "test" + countstr + "+AAKL.pdb";

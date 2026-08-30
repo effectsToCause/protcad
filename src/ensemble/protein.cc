@@ -2113,7 +2113,7 @@ void protein::protMin(bool _backbone, UIntVec _frozenResidues, UIntVec _activeCh
 	protMinCU(_backbone, _frozenResidues, _activeChains);
 }
 
-void protein::protRelax(UInt _plateau, bool _backbone) {protRelaxCU(_plateau, _backbone);}
+void protein::protRelax(UInt _sweeps, bool _backbone) {protRelaxCU(_sweeps, _backbone);}
 
 void protein::protRelax(UIntVec _frozenResidues, UIntVec _activeChains)
 {
@@ -2281,117 +2281,96 @@ int protein::getNumClashesCU()
 	return c;
 }
 
-void protein::protRelaxCU(UInt _plateau, bool _backbone)
-{   
-	saveCurrentState();
+double protein::relaxSidechainsCU(UIntVec _frozenResidues, UIntVec _activeChains, UInt _maxSweeps)
+{
+	// Energy-based steepest descent, not clash-based. The old relax accepted a
+	// rotamer whenever it lowered a hard-sphere clash count, an objective the
+	// selection criterion downstream never reads. Measured on 1crn that left a
+	// ~2600 kcal/mol spread between runs at an essentially fixed clash count,
+	// which swamps a Boltzmann test resolving a few kcal/mol. Clash and vdW now
+	// share the same AMBER radii, so the clash count is only a step-function
+	// shadow of a term the energy already computes more sharply. Let energy decide.
+	if (!deviceMemLoadedAll){loadDeviceMemAll();}
+	double pastEnergy = protEnergyCU();
+	if (_activeChains.size() == 0) {return pastEnergy;}
 
-	// load data on GPU
-	if (!deviceMemLoadedClash){loadDeviceMemClash();}
+	const UInt SIDECHAIN_CANDIDATES = 32;
+	vector < vector <double> > currentConf, newConf;
+	double trialEnergy;
 
-	UInt pastNumClashes = getNumClashesCU();
-	if (pastNumClashes > 0){
-		
-		//--Initialize variables for loop, calculate starting energy and build energy vectors---------------
-		UInt randchain, randres, randrestype, resnum, randrot, chainNum = getNumChains(), nobetter = 0, numClashes;
-		vector < vector <double> > currentRot; vector <UIntVec> allowedRots; srand (time(NULL));
-
-		//--Run optimizaiton loop to relative minima, determined by _plateau----------------------------
-		do
-		{   
-			//--choose random residue
-			randchain = rand() % chainNum;
-			resnum = getNumResidues(randchain);
-			randres = rand() % resnum;
-			randrestype = getTypeFromResNum(randchain, randres);
-			nobetter++;
-
-			//--Rotamer optimization-----------------------------------------------------------------------
-			currentRot = getSidechainDihedrals(randchain, randres);
-			allowedRots = getAllowedRotamers(randchain, randres, randrestype);
-
-			//--Try a max of one rotamer per branchpoint and keep if an improvement, else revert
-			for (UInt b = 0; b < residue::getNumBpt(randrestype); b++)
+	// Build the list of movable residues once, then visit it in a fresh random
+	// order each sweep so no residue is systematically optimized last.
+	vector < pair <UInt, UInt> > movable;
+	for (UInt c = 0; c < _activeChains.size(); c++)
+	{
+		UInt chainIndex = _activeChains[c];
+		if (chainIndex >= getNumChains()) {continue;}
+		for (UInt r = 0; r < getNumResidues(chainIndex); r++)
+		{
+			bool skip = false;
+			for (UInt i = 0; i < _frozenResidues.size(); i++)
 			{
-				if (allowedRots[b].size() > 0)
-				{
-					randrot = rand() % allowedRots[b].size();
-					setRotamerWBC(randchain, randres, b, allowedRots[b][randrot]);
-					numClashes = getNumClashesCU();
-					if (numClashes < pastNumClashes){
-						nobetter = 0;
-						pastNumClashes = numClashes; break;
-					}
-					else
-					{
-						setSidechainDihedralAngles(randchain, randres, currentRot);
-					}
-				}
+				if (r == _frozenResidues[i]) {skip = true; break;}
 			}
-		} while (nobetter < _plateau);
-		
+			if (skip) {continue;}
+			// Residues with no rotatable chi have nothing to sample.
+			currentConf = getSidechainDihedrals(chainIndex, r);
+			bool hasChi = false;
+			for (UInt b = 0; b < currentConf.size(); b++)
+			{
+				if (currentConf[b].size() > 0) {hasChi = true; break;}
+			}
+			if (!hasChi) {continue;}
+			movable.push_back(make_pair(chainIndex, r));
+		}
 	}
+	if (movable.size() == 0) {return pastEnergy;}
+
+	for (UInt sweep = 0; sweep < _maxSweeps; sweep++)
+	{
+		for (UInt i = movable.size(); i > 1; i--)
+		{
+			UInt j = rand() % i;
+			swap(movable[i-1], movable[j]);
+		}
+		bool improved = false;
+		for (UInt m = 0; m < movable.size(); m++)
+		{
+			UInt chainIndex = movable[m].first, resIndex = movable[m].second;
+			currentConf = getSidechainDihedrals(chainIndex, resIndex);
+			trialEnergy = bestSidechainCandidateCU(chainIndex, resIndex, SIDECHAIN_CANDIDATES, newConf);
+			if (trialEnergy < pastEnergy)
+			{
+				setSidechainDihedralAngles(chainIndex, resIndex, newConf);
+				pastEnergy = trialEnergy;
+				improved = true;
+			}
+		}
+		// A sweep that improves nothing will not improve on the next pass either,
+		// beyond the sampling noise of the candidate draw.
+		if (!improved) {break;}
+	}
+	E = pastEnergy;
+	return pastEnergy;
+}
+
+void protein::protRelaxCU(UInt _sweeps, bool _backbone)
+{
+	saveCurrentState();
+	UIntVec frozenResidues, activeChains;
+	for (UInt i = 0; i < getNumChains(); i++) {activeChains.push_back(i);}
+	relaxSidechainsCU(frozenResidues, activeChains, _sweeps);
 	return;
 }
 
 void protein::protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains)
-{  
+{
 	saveCurrentState();
-
-	// load data on GPU
-	if (!deviceMemLoadedClash){loadDeviceMemClash();}
-
-	UInt pastNumClashes = getNumClashesCU();
-	if (pastNumClashes > 0){
-
-		//--Initialize variables for loop, calculate starting energy and build energy vectors---------------
-		UInt randchain, randres, randrestype, randrot, chainNum = _activeChains.size(), nobetter = 0, plateau = 500, numClashes;
-		vector < vector <double> > currentRot; vector <UIntVec> allowedRots; srand (time(NULL));
-		bool skip;
-
-		//--Run optimizaiton loop to relative minima, determined by _plateau----------------------------
-		do
-		{  
-			//--choose random residue not frozen of active chains
-			randchain = _activeChains[rand() % chainNum];
-			do{
-				skip = false;
-				randres = rand() % getNumResidues(randchain);
-				for (UInt i = 0; i < _frozenResidues.size(); i++)
-				{
-					if (randres == _frozenResidues[i]) {skip = true; break;}
-				}
-			} while (skip);
-			randrestype = getTypeFromResNum(randchain, randres);
-			nobetter++;
-
-			//--Rotamer optimization-----------------------------------------------------------------------
-			currentRot = getSidechainDihedrals(randchain, randres);
-			allowedRots = getAllowedRotamers(randchain, randres, randrestype);
-
-			//--Try a max of one rotamer per branchpoint and keep if an improvement, else revert
-			for (UInt b = 0; b < residue::getNumBpt(randrestype); b++)
-			{
-				if (allowedRots[b].size() > 0)
-				{
-					randrot = rand() % allowedRots[b].size();
-					setRotamerWBC(randchain, randres, b, allowedRots[b][randrot]);
-					numClashes = getNumClashesCU();
-					if (numClashes < pastNumClashes){
-						nobetter = 0;
-						pastNumClashes = numClashes; break;
-					}
-					else
-					{
-						setSidechainDihedralAngles(randchain, randres, currentRot);
-					}
-				}
-			}
-		} while (nobetter < plateau);
-	}
+	relaxSidechainsCU(_frozenResidues, _activeChains, 5);
 	return;
 }
 
-void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains)
+void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains, UInt _plateau)
 {
 	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
 	saveCurrentState();
@@ -2401,7 +2380,7 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt chainNum = _activeChains.size(), plateau = 1000;
+	UInt chainNum = _activeChains.size(), plateau = _plateau;
 	const UInt SIDECHAIN_CANDIDATES = 32;
 	double trialEnergy = 0.0; bool haveTrialEnergy = false;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
@@ -2503,7 +2482,7 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 	return;
 }
 
-void protein::protMinCU(bool _backbone)
+void protein::protMinCU(bool _backbone, UInt _plateau)
 {
 	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
 	saveCurrentState();
@@ -2513,7 +2492,7 @@ void protein::protMinCU(bool _backbone)
 
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
-	UInt chainNum = getNumChains(), plateau = 1000;
+	UInt chainNum = getNumChains(), plateau = _plateau;
 	const UInt SIDECHAIN_CANDIDATES = 32;
 	double trialEnergy = 0.0; bool haveTrialEnergy = false;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
