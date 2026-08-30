@@ -1355,24 +1355,49 @@ static int buildOrder(energyContext* ctx)
 // a 44-tile protein produce 176 warps, which does not.  Splitting j recovers
 // the parallelism without touching the sampler.
 //
-// Measured on the P2200, warm clocks, kEnergy us/candidate:
+// Measured on the P2200 at the current default of one replica (b2e66f9).  Arms
+// were run round robin and each is reported as a paired ratio to jSplit=8
+// within its own round, because the card slides from 1518 to 999 MHz as it
+// heats and blocking by arm charges that drift to whichever arm ran late: the
+// same split read 563 us/candidate in one block and 394 in another.  Paired,
+// the spread falls to about 1%.  Ratios of whole-evaluation us/candidate,
+// 7 rounds:
 //
-//   1ubq (nTiles 44, nCand 4)    split 1: 255.8   4: 222.9   8: 224.5   32: 249.9
-//   1crn (nTiles 10, nCand 4)    split 1: 304.0   4: 129.6   8: 106.3   32: 119.8
+//   1crn  nTiles 21   js 4 1.421   8 1.000   12 0.866   16 0.838   21 0.897
+//   1ubq  nTiles 44   js 4 1.061   8 1.000   12 0.998   16 0.996   24 0.988   32 1.019   44 1.076
+//   1lyz  nTiles 71   js 2 1.429   4 1.018   8 1.000   12 0.945   16 0.937   24 0.973
+//   2lzm  nTiles 94   js 4 1.039   8 1.000   12 0.955   16 0.997   24 1.018   32 1.032
 //
-// The gain is large where it was most needed and the optimum sits near 8 in
-// both cases, so the rule caps there; past that the duplicated i-side setup
-// (including the occupancy shell lookup, repeated once per chunk) eats the
-// benefit.  For reference 1ubq at nCand=64 costs 183.3 us/candidate, so the
-// small-population penalty was 1.40x and the split removes about half of it.
-// Note that these numbers are only meaningful warm: the first launch after an
-// idle GPU runs at reduced clocks and reads ~45% slow, which briefly made this
-// deficit look like 2.2x.
+// The optima sit at 336, 1056, 1136 and 1128 warps (nTiles * jSplit * nCand).
+// For everything at or above nTiles 44 that is a constant near 1100, and
+// TARGET_WARPS = 1100 reproduces the measured optimum exactly in all three
+// cases (25, 16, 12).  The old value of 800 was fitted at nCand=4 and then
+// capped at 8, which made it inert; with one replica the launch has a quarter
+// the warps and the target has to rise to compensate.
+//
+// 1crn is the exception: its optimum is 16 but the formula asks for 53, so the
+// clamp to nTiles returns 21 and gives up about 7% against its own best.  That
+// residual is real and left in place -- a target low enough to land on 16 at
+// nTiles 21 would ask for 4 at nTiles 94, which costs 4%.  The clamp still beats
+// the old cap of 8 by 10% there, which is the largest gain of the four; the
+// split matters most on small proteins, which are the ones that cannot fill the
+// card without it, and is worth 1-6% elsewhere.
+//
+// Ending energy is bit-identical across every split above at a fixed seed, so
+// the reduction's index-ordered chunk walk does hold re-association.  These
+// absolutes were taken thermally saturated at 999 MHz; compare them with each
+// other, not across commits.
 //
 // The factor depends only on nTiles.  That matters: if it varied with nCand,
 // a batched evaluation and a single resident one would group their float sums
 // differently and stop agreeing bit for bit, which is what batchTest and
 // replicaTest exist to check.
+//
+// Geometry the split is derived from, recorded for the profile report.  Without
+// it the profile shows what a launch cost but not the shape that produced it,
+// so a chosen jSplit could only be inferred from the source, not read off a run.
+static int g_geomN = 0, g_geomTiles = 0, g_geomSplit = 0;
+
 static int chooseSplit(energyContext* ctx)
 {
     if (ctx->jSplit > 0) return ctx->jSplit;
@@ -1380,13 +1405,16 @@ static int chooseSplit(energyContext* ctx)
     if (const char* e = getenv("PROTCAD_ENERGY_JSPLIT")) s = atoi(e);
     if (s <= 0)
     {
-        const int TARGET_WARPS = 800;
+        const int TARGET_WARPS = 1100;
         s = (TARGET_WARPS + ctx->nTiles - 1) / std::max(1, ctx->nTiles);
     }
+    // Splitting past nTiles only launches empty chunks.  There is no cap below
+    // this: the override has to be able to reach the values the rule is being
+    // measured against, and the rule self-limits because s falls as nTiles grows.
     if (s > ctx->nTiles) s = ctx->nTiles;
-    if (s > 8) s = 8;
     if (s < 1) s = 1;
     ctx->jSplit = s;
+    g_geomN = ctx->N; g_geomTiles = ctx->nTiles; g_geomSplit = s;
     return s;
 }
 
@@ -1791,8 +1819,9 @@ static void profReport()
                + g_bprof.copy + g_bprof.reduce;
     if (tot <= 0) return;
     const long nc = std::max(1L, g_bprof.cands);
-    fprintf(stderr, "\n[energy] evalBatch profile: %ld calls, %ld candidates\n",
-            g_bprof.calls, g_bprof.cands);
+    fprintf(stderr, "\n[energy] evalBatch profile: %ld calls, %ld candidates"
+            " (N=%d, nTiles=%d, jSplit=%d)\n",
+            g_bprof.calls, g_bprof.cands, g_geomN, g_geomTiles, g_geomSplit);
     const char* nm[6] = {"kGatherCoords", "kTileBounds", "kOccupancy",
                          "kEnergy", "D2H copy", "host Kahan"};
     double vv[6] = {g_bprof.gather, g_bprof.tile, g_bprof.occ,
