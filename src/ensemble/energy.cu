@@ -1547,9 +1547,10 @@ static int buildOrder(energyContext* ctx)
 //   2lzm  nTiles 94   js 4 1.039   8 1.000   12 0.955   16 0.997   24 1.018   32 1.032
 //
 // The optima sit at 336, 1056, 1136 and 1128 warps (nTiles * jSplit * nCand).
-// For everything at or above nTiles 44 that is a constant near 1100, and
-// TARGET_WARPS = 1100 reproduces the measured optimum exactly in all three
-// cases (25, 16, 12).  The old value of 800 was fitted at nCand=4 and then
+// For everything at or above nTiles 44 that is a constant near 1100, which
+// reproduces the measured optimum exactly in all three cases (25, 16, 12).
+// This constant is per-card -- see targetWarps below, where the 3090's own
+// measured value is 3400.  The old value of 800 was fitted at nCand=4 and then
 // capped at 8, which made it inert; with one replica the launch has a quarter
 // the warps and the target has to rise to compensate.
 //
@@ -1566,15 +1567,67 @@ static int buildOrder(energyContext* ctx)
 // absolutes were taken thermally saturated at 999 MHz; compare them with each
 // other, not across commits.
 //
-// The factor depends only on nTiles.  That matters: if it varied with nCand,
-// a batched evaluation and a single resident one would group their float sums
-// differently and stop agreeing bit for bit, which is what batchTest and
-// replicaTest exist to check.
+// The factor depends on nTiles and on the device, but deliberately not on
+// nCand.  That last part is what batchTest and replicaTest exist to check: if
+// it varied with nCand, a batched evaluation and a single resident one would
+// group their float sums differently and stop agreeing bit for bit.  Varying
+// by device is safe for the same reason the split can be tuned at all --
+// ending energy is bit-identical across splits -- but it does mean the chosen
+// jSplit is a property of the card, so quote it from the profile line rather
+// than assuming the value another machine reported.
 //
 // Geometry the split is derived from, recorded for the profile report.  Without
 // it the profile shows what a launch cost but not the shape that produced it,
 // so a chosen jSplit could only be inferred from the source, not read off a run.
 static int g_geomN = 0, g_geomTiles = 0, g_geomSplit = 0;
+
+// Warp target for the split, resolved once per process and cached: chooseSplit
+// runs on every evaluation and cudaGetDeviceProperties is far too slow to sit
+// on that path.
+//
+// The two entries below are each measured on their own card, by the round-robin
+// paired sweep described above.  They are NOT related by any capacity ratio,
+// and the first attempt at this function assumed they were:
+//
+//     card    SMs  warps/SM  resident  measured optimum  optimum/resident
+//     P2200    10        64       640              1100            1.72x
+//     3090     82        48      3936              3400            0.86x
+//
+// Expressing the P2200 number as 1.72x resident and scaling it to the 3090
+// predicts 6765, which is 2x the measured optimum and pushes every protein to
+// the nTiles clamp -- 8-9% slower than 3400 on 1lyz and 2lzm.  Occupancy alone
+// does not determine this, so the constant stays a measurement, not a formula.
+//
+// 3400 was read off the 3090 sweep, where the unclamped optima were 3408 warps
+// (1lyz, nTiles 71, jSplit 48) and 3384 (2lzm, nTiles 94, jSplit 36).  It
+// reproduces the measured best jSplit on all three: 1ubq 44 (clamped), 1lyz 47
+// against a measured 48, 2lzm 36 exactly.
+//
+// An unrecognised card gets 1.0x its own resident capacity.  That is a guess,
+// but a bracketed one -- it sits between the two measured ratios -- and the
+// optimum is broad enough (24/36/48 are within 2.5% of each other on 2lzm)
+// that being somewhat off costs little.  Measure before trusting it on a new
+// card; PROTCAD_ENERGY_JSPLIT overrides the whole rule for exactly that.
+static int targetWarps()
+{
+    static int cached = 0;
+    if (cached == 0)
+    {
+        cached = 1100;                       // P2200 value if the query fails
+        int dev = 0;
+        cudaDeviceProp prop;
+        if (cudaGetDevice(&dev) == cudaSuccess &&
+            cudaGetDeviceProperties(&prop, dev) == cudaSuccess)
+        {
+            const int resident =
+                prop.multiProcessorCount * (prop.maxThreadsPerMultiProcessor / 32);
+            if (prop.major == 6)      cached = 1100;   // Pascal, measured
+            else if (prop.major == 8) cached = 3400;   // Ampere, measured
+            else if (resident > 0)    cached = resident;
+        }
+    }
+    return cached;
+}
 
 static int chooseSplit(energyContext* ctx)
 {
@@ -1583,8 +1636,9 @@ static int chooseSplit(energyContext* ctx)
     if (const char* e = getenv("PROTCAD_ENERGY_JSPLIT")) s = atoi(e);
     if (s <= 0)
     {
-        const int TARGET_WARPS = 1100;
-        s = (TARGET_WARPS + ctx->nTiles - 1) / std::max(1, ctx->nTiles);
+        // Per-card measured target; see targetWarps above.  Exact no-op on the
+        // P2200, so yesterday's sweep on that card still holds.
+        s = (targetWarps() + ctx->nTiles - 1) / std::max(1, ctx->nTiles);
     }
     // Splitting past nTiles only launches empty chunks.  There is no cap below
     // this: the override has to be able to reach the values the rule is being
