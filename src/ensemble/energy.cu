@@ -174,6 +174,17 @@ struct energyContext
     int   *h_order;
 
     std::vector<double> perAtom;  // scratch for deterministic host reduction
+    // invOrder[i] is the sorted slot holding original atom i, i.e. the inverse
+    // of h_order restricted to the non-padding slots.  h_order is a property of
+    // the spatial sort and is therefore fixed for a whole batch, so building
+    // this once lets the reduction read the device buffer directly in original
+    // atom order instead of scattering into perAtom for every term of every
+    // candidate.  The summation order is unchanged, so results stay bitwise
+    // identical to the scatter-then-sum version.
+    std::vector<int> invOrder;
+    // Host copy of the torsion quartets, used to attribute each torsion's
+    // energy back to its four atoms for the per-atom export.
+    std::vector<int> h_torAtoms;
 
     std::string lastError;
 };
@@ -1275,6 +1286,8 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
             }
             cudaMemcpy(ctx->d_torAtoms, topo.torsionAtoms,
                        (size_t)4 * nTor * sizeof(int), cudaMemcpyHostToDevice);
+            ctx->h_torAtoms.assign(topo.torsionAtoms,
+                                   topo.torsionAtoms + (size_t)4 * nTor);
             cudaMemcpy(ctx->d_torBarrier, &bb[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
             cudaMemcpy(ctx->d_torPhase,   &ph[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
             cudaMemcpy(ctx->d_torPeriod,  &pn[0], nTor * sizeof(ereal), cudaMemcpyHostToDevice);
@@ -1650,6 +1663,17 @@ static int chooseSplit(energyContext* ctx)
     return s;
 }
 
+// Rebuild invOrder from the freshly copied h_order.  Call once per evaluation,
+// after h_order has been read back and before any term is reduced.
+static void buildInvOrder(energyContext* ctx, int nPad)
+{
+    ctx->invOrder.assign(ctx->N, -1);
+    for (int s = 0; s < nPad; ++s) {
+        int oi = ctx->h_order[s];
+        if (oi >= 0) ctx->invOrder[oi] = s;
+    }
+}
+
 // Dihedral energies for nCand conformations held in original atom order at
 // (x,y,z).  Returns one total per candidate in tot[].
 //
@@ -1658,11 +1682,15 @@ static int chooseSplit(energyContext* ctx)
 // the working precision is single, and the order has to be a property of the
 // topology rather than of the launch geometry or two evaluations of the same
 // structure stop agreeing bit for bit.
-static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
-                         const ereal* z, int nCand, double* tot)
+// Queue the torsion kernel and its device-to-host copy on the current stream
+// without synchronising.  Split out from the reduction so the batch path can
+// issue it alongside kEnergy and let the single existing sync cover both: run
+// as its own launch-then-blocking-copy step it cost 23 us/candidate on the
+// 3090, almost all of it a second round trip rather than arithmetic.
+static int torsionLaunch(energyContext* ctx, const ereal* x, const ereal* y,
+                         const ereal* z, int nCand)
 {
     const int nTor = ctx->nTor;
-    for (int k = 0; k < nCand; ++k) tot[k] = 0.0;
     if (nTor <= 0 || ctx->p.torsionScale == 0.0) return 0;
 
     if (nCand > ctx->torCap) {
@@ -1681,9 +1709,20 @@ static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
                          ctx->d_torPhase, ctx->d_torPeriod, ctx->d_silent,
                          ereal(ctx->p.torsionScale), ctx->d_torE);
     CUDA_OK(ctx, cudaPeekAtLastError());
-    CUDA_OK(ctx, cudaMemcpy(&ctx->h_torE[0], ctx->d_torE,
-                            (size_t)nTor * nCand * sizeof(ereal),
-                            cudaMemcpyDeviceToHost));
+    CUDA_OK(ctx, cudaMemcpyAsync(&ctx->h_torE[0], ctx->d_torE,
+                                 (size_t)nTor * nCand * sizeof(ereal),
+                                 cudaMemcpyDeviceToHost, 0));
+    return 0;
+}
+
+// Host side of the torsion term.  Requires that the copy queued by
+// torsionLaunch has completed.
+static int torsionReduce(energyContext* ctx, int nCand, double* tot,
+                         double* perAtomOut = 0)
+{
+    const int nTor = ctx->nTor;
+    for (int k = 0; k < nCand; ++k) tot[k] = 0.0;
+    if (nTor <= 0 || ctx->p.torsionScale == 0.0) return 0;
 
     for (int k = 0; k < nCand; ++k) {
         const ereal* src = &ctx->h_torE[(size_t)k * nTor];
@@ -1696,7 +1735,32 @@ static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
         }
         tot[k] = sum;
     }
+
+    // Attribute each torsion evenly to its four atoms, matching the convention
+    // the nonbonded terms use (a pair interaction is split evenly between its
+    // two atoms).  Without this the per-atom export omits the torsion term
+    // entirely while the reported total includes it, so the documented
+    // "per-atom values sum to the total" identity fails -- on 1crn by 516 of a
+    // 511 kcal/mol total, which is the whole quantity, not a rounding error.
+    if (perAtomOut && nCand == 1 && !ctx->h_torAtoms.empty()) {
+        const ereal* src = &ctx->h_torE[0];
+        for (int t = 0; t < nTor; ++t) {
+            double q = 0.25 * double(src[t]);
+            for (int a = 0; a < 4; ++a) perAtomOut[ctx->h_torAtoms[4 * t + a]] += q;
+        }
+    }
     return 0;
+}
+
+// Convenience wrapper for the non-batched paths, where the extra round trip is
+// paid once per evaluation rather than once per candidate batch.
+static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
+                         const ereal* z, int nCand, double* tot,
+                         double* perAtomOut = 0)
+{
+    if (torsionLaunch(ctx, x, y, z, nCand) != 0) return -1;
+    CUDA_OK(ctx, cudaStreamSynchronize(0));
+    return torsionReduce(ctx, nCand, tot, perAtomOut);
 }
 
 static bool ensurePart(energyContext* ctx, int nCand)
@@ -1790,20 +1854,18 @@ static int energyComputeImpl(energyContext* ctx,
     // what makes repeated evaluations of the same conformation bit-identical.
     if (perAtomOut) std::fill(perAtomOut, perAtomOut + ctx->N, 0.0);
 
+    buildInvOrder(ctx, nPad);
+    const int* inv = &ctx->invOrder[0];
+
     double out[5];
     for (int t = 0; t < 5; ++t) {
-        std::fill(ctx->perAtom.begin(), ctx->perAtom.end(), 0.0);
         const ereal* src = h + (size_t)t * nPad;
-        for (int s = 0; s < nPad; ++s) {
-            int oi = ctx->h_order[s];
-            if (oi >= 0) ctx->perAtom[oi] = double(src[s]);
-        }
-        if (perAtomOut)
-            for (int i = 0; i < ctx->N; ++i) perAtomOut[i] += ctx->perAtom[i];
-
         double sum = 0.0, c = 0.0;
         for (int i = 0; i < ctx->N; ++i) {
-            double yv = ctx->perAtom[i] - c;
+            int s = inv[i];
+            double v = (s >= 0 ? double(src[s]) : 0.0);
+            if (perAtomOut) perAtomOut[i] += v;
+            double yv = v - c;
             double tt = sum + yv;
             c = (tt - sum) - yv;
             sum = tt;
@@ -1812,7 +1874,7 @@ static int energyComputeImpl(energyContext* ctx,
     }
 
     double eTor = 0.0;
-    if (torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor) != 0) return -1;
+    if (torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor, perAtomOut) != 0) return -1;
 
     double total = out[0] + out[1] + out[2] + out[3] + out[4] + eTor;
     if (totalOut) *totalOut = total;
@@ -2084,9 +2146,9 @@ static bool ensureBatch(energyContext* ctx, int nCand)
 // share of the batch cost, so measure before optimising.
 struct batchProfile
 {
-    double gather, tile, occ, energy, copy, reduce; long calls; long cands;
-    batchProfile() : gather(0), tile(0), occ(0), energy(0), copy(0), reduce(0),
-                     calls(0), cands(0) {}
+    double gather, tile, occ, energy, copy, torsion, reduce; long calls; long cands;
+    batchProfile() : gather(0), tile(0), occ(0), energy(0), copy(0), torsion(0),
+                     reduce(0), calls(0), cands(0) {}
 };
 static batchProfile g_bprof;
 static int g_bprofOn = -1;
@@ -2101,17 +2163,21 @@ static void profReport()
 {
     if (!g_bprof.calls) return;
     double tot = g_bprof.gather + g_bprof.tile + g_bprof.occ + g_bprof.energy
-               + g_bprof.copy + g_bprof.reduce;
+               + g_bprof.copy + g_bprof.torsion + g_bprof.reduce;
     if (tot <= 0) return;
     const long nc = std::max(1L, g_bprof.cands);
     fprintf(stderr, "\n[energy] evalBatch profile: %ld calls, %ld candidates"
             " (N=%d, nTiles=%d, jSplit=%d)\n",
             g_bprof.calls, g_bprof.cands, g_geomN, g_geomTiles, g_geomSplit);
-    const char* nm[6] = {"kGatherCoords", "kTileBounds", "kOccupancy",
-                         "kEnergy", "D2H copy", "host Kahan"};
-    double vv[6] = {g_bprof.gather, g_bprof.tile, g_bprof.occ,
-                    g_bprof.energy, g_bprof.copy, g_bprof.reduce};
-    for (int i = 0; i < 6; ++i)
+    // "torsion" is the whole torsionTotals call -- kernel launch, its own D2H,
+    // and its Kahan sum.  It used to be billed to "host Kahan", which made that
+    // bucket look like pure host reduction cost when it was not.
+    const char* nm[7] = {"kGatherCoords", "kTileBounds", "kOccupancy",
+                         "kEnergy", "D2H copy", "torsion", "host Kahan"};
+    double vv[7] = {g_bprof.gather, g_bprof.tile, g_bprof.occ,
+                    g_bprof.energy, g_bprof.copy, g_bprof.torsion,
+                    g_bprof.reduce};
+    for (int i = 0; i < 7; ++i)
         fprintf(stderr, "  %-14s %8.3f s  %5.1f%%   %8.1f us/cand\n",
                 nm[i], vv[i], 100.0 * vv[i] / tot, 1e6 * vv[i] / nc);
     fprintf(stderr, "  %-14s %8.3f s          %8.1f us/cand\n",
@@ -2206,6 +2272,12 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
         CUDA_OK(ctx, cudaPeekAtLastError());
     }
 
+    // Issue the torsion kernel and its copy here, before the single sync
+    // below, so it overlaps kEnergy and shares the one round trip instead of
+    // adding a second launch-and-block after the nonbonded copies.
+    if (torsionLaunch(ctx, ctx->d_bx, ctx->d_by, ctx->d_bz, nCand) != 0)
+        return -1;
+
     double tB = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
 
     CUDA_OK(ctx, cudaMemcpy(&ctx->h_bterms[0], ctx->d_bterms,
@@ -2215,22 +2287,23 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
 
     double tC = prof ? profWall() : 0.0;
 
+    buildInvOrder(ctx, nPad);
+    const int* inv = &ctx->invOrder[0];
+
     std::vector<double> eTor(nCand, 0.0);
-    if (torsionTotals(ctx, ctx->d_bx, ctx->d_by, ctx->d_bz, nCand, &eTor[0]) != 0)
+    if (torsionReduce(ctx, nCand, &eTor[0]) != 0)
         return -1;
+
+    double tT = prof ? profWall() : 0.0;
 
     for (int k = 0; k < nCand; ++k) {
         double total = eTor[k];
         for (int t = 0; t < 5; ++t) {
-            std::fill(ctx->perAtom.begin(), ctx->perAtom.end(), 0.0);
             const ereal* src = &ctx->h_bterms[(size_t)t * stride + (size_t)k * nPad];
-            for (int sIdx = 0; sIdx < nPad; ++sIdx) {
-                int oi = ctx->h_order[sIdx];
-                if (oi >= 0) ctx->perAtom[oi] = double(src[sIdx]);
-            }
             double sum = 0.0, c = 0.0;
             for (int i = 0; i < N; ++i) {
-                double yv = ctx->perAtom[i] - c;
+                int sIdx = inv[i];
+                double yv = (sIdx >= 0 ? double(src[sIdx]) : 0.0) - c;
                 double tt = sum + yv;
                 c = (tt - sum) - yv;
                 sum = tt;
@@ -2247,7 +2320,8 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
         g_bprof.occ     += tOcc - tTile;
         g_bprof.energy  += tB - tOcc;
         g_bprof.copy    += tC - tB;
-        g_bprof.reduce  += tD - tC;
+        g_bprof.torsion += tT - tC;
+        g_bprof.reduce  += tD - tT;
         g_bprof.calls   += 1;
         g_bprof.cands   += nCand;
     }

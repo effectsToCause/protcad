@@ -439,11 +439,13 @@ int energyCompute(energyContext* ctx,
                   double* totalOut, energyBreakdown* breakdown);
 
 // As energyCompute, but additionally writes the per-atom energy (the sum of
-// all five terms attributed to that atom) into perAtomOut, which must have
-// room for topology.numAtoms doubles and is indexed in the caller's original
-// atom order.  Every pair interaction is split evenly between its two atoms,
-// so the per-atom values sum to the total.  This is what lets callers derive
-// per-residue energies without a second implementation of the model.
+// all five nonbonded terms attributed to that atom, plus a quarter of each
+// torsion the atom takes part in) into perAtomOut, which must have room for
+// topology.numAtoms doubles and is indexed in the caller's original atom
+// order.  Every pair interaction is split evenly between its two atoms and
+// every torsion evenly between its four, so the per-atom values sum to the
+// total.  This is what lets callers derive per-residue energies without a
+// second implementation of the model.
 int energyComputeAtoms(energyContext* ctx,
                        const double* x, const double* y, const double* z,
                        double* totalOut, energyBreakdown* breakdown,
