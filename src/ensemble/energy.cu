@@ -105,6 +105,16 @@ struct energyContext
     ereal* d_gather;          // 7 terms x count, compacted for the host sum
     ereal* d_dpart;           // delta partials, four blocks of dSplitCap * nPad
     int    dSplitCap;
+    ereal* d_stage;           // 3 x count staging for the scattered coord upload
+    ereal* h_stage;
+    int*   d_torList;         // torsions touched by the changed set
+    ereal* d_torSub;
+    ereal* h_torSub;
+    std::vector<int> h_torList;
+    std::vector<int> torStart, torIdx;   // CSR: atom -> torsions containing it
+    int    torPrimed;         // h_torE holds every torsion at the current coords
+    int    deltaSetValid;     // cmask / inv / tileList match d_thaw and the sort
+    int    deltaNList;
     int   *d_resIndex;
     unsigned char *d_silent;
     int   *d_exclCount, *d_exclList, *d_exclSpan;
@@ -513,10 +523,12 @@ __global__ void kTorsion(const ereal* __restrict__ x,
                          const ereal* __restrict__ tPeriod,
                          const unsigned char* __restrict__ silent,
                          ereal scale,
-                         ereal* __restrict__ out)
+                         ereal* __restrict__ out,
+                         const int* __restrict__ torList = 0, int nList = 0)
 {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     int k = blockIdx.y;
+    if (torList) { if (t >= nList) return; t = torList[t]; }
     if (t >= nTor || k >= nCand) return;
 
     const ereal* cx = x + (size_t)k * N;
@@ -1304,6 +1316,9 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_inv = 0; ctx->d_atoms = 0;
     ctx->d_eVdw2 = ctx->d_eEle2 = ctx->d_gather = 0;
     ctx->d_dpart = 0; ctx->dSplitCap = 0;
+    ctx->d_stage = 0; ctx->h_stage = 0;
+    ctx->d_torList = 0; ctx->d_torSub = 0; ctx->h_torSub = 0; ctx->torPrimed = 0;
+    ctx->deltaSetValid = 0; ctx->deltaNList = 0;
     ctx->d_x = ctx->d_y = ctx->d_z = 0;
     ctx->d_sx = ctx->d_sy = ctx->d_sz = 0;
     ctx->d_srad = ctx->d_ssqrtEps = ctx->d_schg = ctx->d_sselfVol = 0;
@@ -1354,6 +1369,10 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ok &= devAlloc(&ctx->d_eVdw2, (size_t)ctx->nPad);
     ok &= devAlloc(&ctx->d_eEle2, (size_t)ctx->nPad);
     ok &= devAlloc(&ctx->d_gather, (size_t)ctx->nPad * 7);
+    ok &= devAlloc(&ctx->d_stage, (size_t)ctx->nPad * 3);
+    if (ok && cudaMallocHost((void**)&ctx->h_stage,
+                             (size_t)ctx->nPad * 3 * sizeof(ereal)) != cudaSuccess)
+    {   ctx->h_stage = 0; ok = false; }
     ok &= devAlloc(&ctx->d_rad, N)      && devAlloc(&ctx->d_sqrtEps, N);
     ok &= devAlloc(&ctx->d_chg, N)      && devAlloc(&ctx->d_selfVol, N);
     ok &= devAlloc(&ctx->d_resIndex, N) && devAlloc(&ctx->d_silent, N);
@@ -1527,11 +1546,14 @@ void energyDestroy(energyContext* ctx)
         ctx->d_groupBegin, ctx->d_nGroups, ctx->d_accept,
         ctx->d_cmask, ctx->d_tileList, ctx->d_tileCount, ctx->d_inv,
         ctx->d_atoms, ctx->d_eVdw2, ctx->d_eEle2, ctx->d_gather,
-        ctx->d_dpart
+        ctx->d_dpart, ctx->d_stage, ctx->d_torSub
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
 
+    if (ctx->h_stage) cudaFreeHost(ctx->h_stage);
+    if (ctx->h_torSub) cudaFreeHost(ctx->h_torSub);
+    if (ctx->d_torList) cudaFree(ctx->d_torList);
     if (ctx->h_x) cudaFreeHost(ctx->h_x);
     if (ctx->h_y) cudaFreeHost(ctx->h_y);
     if (ctx->h_z) cudaFreeHost(ctx->h_z);
@@ -1663,6 +1685,7 @@ static int buildOrder(energyContext* ctx)
                                            ctx->d_srad, ctx->d_ssilent,
                                            ctx->d_tileLo, ctx->d_tileHi);
     CUDA_OK(ctx, cudaPeekAtLastError());
+    ctx->deltaSetValid = 0;   // d_sorig moved, so cmask/inv/tileList are stale
     return 0;
 }
 
@@ -1820,6 +1843,13 @@ static void buildInvOrder(energyContext* ctx, int nPad)
 // issue it alongside kEnergy and let the single existing sync cover both: run
 // as its own launch-then-blocking-copy step it cost 23 us/candidate on the
 // 3090, almost all of it a second round trip rather than arithmetic.
+__global__ void kGatherTor(int nList, const int* __restrict__ torList,
+                           const ereal* __restrict__ torE, ereal* __restrict__ out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < nList) out[i] = torE[torList[i]];
+}
+
 static int torsionLaunch(energyContext* ctx, const ereal* x, const ereal* y,
                          const ereal* z, int nCand)
 {
@@ -1885,6 +1915,79 @@ static int torsionReduce(energyContext* ctx, int nCand, double* tot,
     return 0;
 }
 
+// A move can only change torsions that contain a moved atom.  Recompute just
+// those, refresh their cached per-torsion energies, and re-sum on the host:
+// the host sum stays over every torsion in ascending order, so the result is
+// bit-identical to a full evaluation rather than a drifting running total.
+static int torsionDelta(energyContext* ctx, const int* atoms, int count,
+                        bool rebuildList, double* tot)
+{
+    const int nTor = ctx->nTor;
+    if (nTor <= 0 || ctx->p.torsionScale == 0.0) { if (tot) *tot = 0.0; return 0; }
+    if (!ctx->torPrimed || ctx->h_torAtoms.empty()) return 1;   // caller falls back
+
+    if (ctx->torStart.empty()) {
+        ctx->torStart.assign(ctx->N + 1, 0);
+        for (int t = 0; t < 4 * nTor; ++t) ++ctx->torStart[ctx->h_torAtoms[t] + 1];
+        for (int a = 0; a < ctx->N; ++a) ctx->torStart[a + 1] += ctx->torStart[a];
+        std::vector<int> cur(ctx->torStart.begin(), ctx->torStart.end() - 1);
+        ctx->torIdx.assign(4 * nTor, 0);
+        for (int t = 0; t < nTor; ++t)
+            for (int j = 0; j < 4; ++j) ctx->torIdx[cur[ctx->h_torAtoms[4 * t + j]]++] = t;
+    }
+
+    if (rebuildList || ctx->h_torList.empty()) {
+        std::vector<unsigned char> seen(nTor, 0);
+        ctx->h_torList.clear();
+        for (int i = 0; i < count; ++i) {
+            const int a = atoms[i];
+            if (a < 0 || a >= ctx->N) continue;
+            for (int j = ctx->torStart[a]; j < ctx->torStart[a + 1]; ++j) {
+                const int t = ctx->torIdx[j];
+                if (!seen[t]) { seen[t] = 1; ctx->h_torList.push_back(t); }
+            }
+        }
+        std::sort(ctx->h_torList.begin(), ctx->h_torList.end());
+        if (!ctx->d_torList) {
+            if (!devAlloc(&ctx->d_torList, nTor)) return -1;
+            if (!ctx->d_torSub && !devAlloc(&ctx->d_torSub, nTor)) return -1;
+            if (!ctx->h_torSub &&
+                cudaMallocHost((void**)&ctx->h_torSub, (size_t)nTor * sizeof(ereal))
+                    != cudaSuccess) { ctx->h_torSub = 0; return -1; }
+        }
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_torList, &ctx->h_torList[0],
+                                ctx->h_torList.size() * sizeof(int),
+                                cudaMemcpyHostToDevice));
+    }
+
+    const int nL = (int)ctx->h_torList.size();
+    if (nL > 0) {
+        kTorsion<<<dim3((nL + 255) / 256, 1), 256>>>(
+            ctx->d_x, ctx->d_y, ctx->d_z, ctx->N, 1, nTor,
+            ctx->d_torAtoms, ctx->d_torBarrier, ctx->d_torPhase, ctx->d_torPeriod,
+            ctx->d_silent, ereal(ctx->p.torsionScale), ctx->d_torE,
+            ctx->d_torList, nL);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        kGatherTor<<<(nL + 255) / 256, 256>>>(nL, ctx->d_torList, ctx->d_torE,
+                                              ctx->d_torSub);
+        CUDA_OK(ctx, cudaMemcpyAsync(ctx->h_torSub, ctx->d_torSub,
+                                     (size_t)nL * sizeof(ereal),
+                                     cudaMemcpyDeviceToHost, 0));
+        CUDA_OK(ctx, cudaStreamSynchronize(0));
+        for (int i = 0; i < nL; ++i) ctx->h_torE[ctx->h_torList[i]] = ctx->h_torSub[i];
+    }
+
+    double sum = 0.0, c = 0.0;
+    for (int t = 0; t < nTor; ++t) {
+        double yv = double(ctx->h_torE[t]) - c;
+        double tt = sum + yv;
+        c = (tt - sum) - yv;
+        sum = tt;
+    }
+    if (tot) *tot = sum;
+    return 0;
+}
+
 // Convenience wrapper for the non-batched paths, where the extra round trip is
 // paid once per evaluation rather than once per candidate batch.
 static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
@@ -1893,6 +1996,7 @@ static int torsionTotals(energyContext* ctx, const ereal* x, const ereal* y,
 {
     if (torsionLaunch(ctx, x, y, z, nCand) != 0) return -1;
     CUDA_OK(ctx, cudaStreamSynchronize(0));
+    if (nCand == 1) ctx->torPrimed = 1;
     return torsionReduce(ctx, nCand, tot, perAtomOut);
 }
 
@@ -1972,6 +2076,7 @@ int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
                             int accumulate)
 {
     if (!ctx) return -1;
+    ctx->deltaSetValid = 0;   // a new thaw set means a new changed set
     if (ctx->h_thaw.size() != (size_t)ctx->nPad) ctx->h_thaw.assign(ctx->nPad, 0);
     std::vector<unsigned char>& mask = ctx->h_thaw;
     if (!accumulate) std::fill(mask.begin(), mask.end(), (unsigned char)0);
@@ -2059,6 +2164,24 @@ __global__ void kBuildCmask(int nPad, const int* __restrict__ sorig,
     if (s >= nPad) return;
     const int o = sorig[s];
     cmask[s] = (o >= 0 && thawOrig[o]) ? (unsigned char)1 : (unsigned char)0;
+}
+
+// Only the atoms of the changed set can have moved, so a delta never needs to
+// re-upload N coordinates.  Writing d_s* through the inverse permutation as
+// well is what lets the delta skip the spatial re-sort entirely.
+__global__ void kScatterCoords(int count, const int* __restrict__ atoms,
+                               const ereal* __restrict__ stage,
+                               const int* __restrict__ inv,
+                               ereal* x, ereal* y, ereal* z,
+                               ereal* sx, ereal* sy, ereal* sz)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const int a = atoms[i];
+    const ereal vx = stage[i], vy = stage[count + i], vz = stage[2 * count + i];
+    x[a] = vx; y[a] = vy; z[a] = vz;
+    const int sIdx = inv[a];
+    sx[sIdx] = vx; sy[sIdx] = vy; sz[sIdx] = vz;
 }
 
 __global__ void kBuildInv(int nPad, const int* __restrict__ sorig,
@@ -2158,32 +2281,66 @@ int energyComputeDelta(energyContext* ctx,
     }
     const int nPad = ctx->nPad, nT = ctx->nTiles;
 
-    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
-    DT_MARK(upload);
-    if (buildOrder(ctx) != 0) return -1;
-    DT_MARK(order);
-
     ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
               ? ereal(4.188) : ereal(4.1887902048);
-
     const int tb = 256;
-    kBuildCmask<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_thaw,
-                                              ctx->d_cmask);
-    kBuildInv<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_inv);
-    CUDA_OK(ctx, cudaMemset(ctx->d_tileCount, 0, sizeof(int)));
-    kSelectTiles<<<(nT + tb - 1) / tb, tb>>>(nT, ctx->d_cmask,
-                                             ctx->d_tileList, ctx->d_tileCount);
-    CUDA_OK(ctx, cudaPeekAtLastError());
-    DT_MARK(masks);
 
-    int nList = 0;
-    CUDA_OK(ctx, cudaMemcpy(&nList, ctx->d_tileCount, sizeof(int),
-                            cudaMemcpyDeviceToHost));
+    if (!ctx->coordsValid) {
+        setError(ctx, "energyComputeDelta", "no coordinates have been uploaded",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+
+    // The changed set, its tile list and the inverse permutation depend only on
+    // the thaw set and the spatial sort, and a move changes neither between the
+    // before and after evaluation.  Build them once per move, not twice.
+    const bool rebuiltSet = !ctx->deltaSetValid;
+    if (!ctx->deltaSetValid) {
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_atoms, atoms, count * sizeof(int),
+                                cudaMemcpyHostToDevice));
+        kBuildCmask<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_thaw,
+                                                  ctx->d_cmask);
+        kBuildInv<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_inv);
+        CUDA_OK(ctx, cudaMemset(ctx->d_tileCount, 0, sizeof(int)));
+        kSelectTiles<<<(nT + tb - 1) / tb, tb>>>(nT, ctx->d_cmask,
+                                                 ctx->d_tileList, ctx->d_tileCount);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        CUDA_OK(ctx, cudaMemcpy(&ctx->deltaNList, ctx->d_tileCount, sizeof(int),
+                                cudaMemcpyDeviceToHost));
+        ctx->deltaSetValid = 1;
+    }
+    DT_MARK(masks);
+    const int nList = ctx->deltaNList;
+
+    // Scatter, rather than re-upload.  Nothing outside the changed set can have
+    // moved, so the rest of d_x and d_sx are already correct.
+    if (x) {
+        for (int i = 0; i < count; ++i) {
+            const int a = atoms[i];
+            ctx->h_stage[i]             = ereal(x[a]);
+            ctx->h_stage[count + i]     = ereal(y[a]);
+            ctx->h_stage[2 * count + i] = ereal(z[a]);
+        }
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_stage, ctx->h_stage,
+                                3 * count * sizeof(ereal), cudaMemcpyHostToDevice));
+        kScatterCoords<<<(count + tb - 1) / tb, tb>>>(
+            count, ctx->d_atoms, ctx->d_stage, ctx->d_inv,
+            ctx->d_x, ctx->d_y, ctx->d_z, ctx->d_sx, ctx->d_sy, ctx->d_sz);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+    }
+    DT_MARK(upload);
+
+    // Keeping the existing sort costs nothing in correctness -- the sort is a
+    // locality heuristic, and the box-box rejection stays exact because the
+    // tile bounds are recomputed.  Over nT tiles this is a rounding error next
+    // to buildOrder's bin/scan/gather round trip.
+    kTileBounds<<<(nT + 127) / 128, 128>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+                                           ctx->d_srad, ctx->d_ssilent,
+                                           ctx->d_tileLo, ctx->d_tileHi);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    DT_MARK(order);
     DT_MARK(count);
     if (nList == 0) { if (partOut) *partOut = 0.0; }
-
-    CUDA_OK(ctx, cudaMemcpy(ctx->d_atoms, atoms, count * sizeof(int),
-                            cudaMemcpyHostToDevice));
 
     // Restricting the i rows removes work, but it also removes parallelism:
     // 300 atoms is about ten tiles, so ten warps, on a card that wants
@@ -2278,7 +2435,10 @@ int energyComputeDelta(energyContext* ctx,
 
     if (torsionOut) {
         double eTor = 0.0;
-        if (torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor, 0) != 0)
+        const int rc = torsionDelta(ctx, atoms, count, rebuiltSet, &eTor);
+        if (rc < 0) return -1;
+        if (rc > 0 &&
+            torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor, 0) != 0)
             return -1;
         *torsionOut = eTor;
         DT_MARK(torsion);

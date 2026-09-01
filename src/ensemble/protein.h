@@ -422,6 +422,11 @@ private:
 	energyParams itsEnergyParams;
 	bool itsEnergyParamsSet = false;
 	std::vector<double> itsCoordX, itsCoordY, itsCoordZ;
+	// atomIterator walks the residue tree through virtual calls, which is a
+	// large fixed cost per delta.  Index it once and refresh by atom instead.
+	std::vector<atom*> itsAtomPtrs;
+	void buildAtomIndex();
+	void refreshDeviceCoords(const std::vector<int>& _atoms);
 	std::vector<int> itsThawList;   // atoms the last move thawed, ascending
 	std::vector<int> itsRotGroupFirst, itsRotGroupCount;   // per residue, walk order
 	std::vector< std::vector<int> > itsResRotIndex;        // [chain][resInChain] -> walk index

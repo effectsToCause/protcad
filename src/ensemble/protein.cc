@@ -1506,7 +1506,7 @@ void protein::freeDeviceMemClash()  {freeDeviceMemAll();}
 void protein::freeDeviceMemAll()
 {
 	if (itsEnergyContext) {energyDestroy(itsEnergyContext); itsEnergyContext = 0;}
-	itsCoordX.clear(); itsCoordY.clear(); itsCoordZ.clear();
+	itsCoordX.clear(); itsCoordY.clear(); itsCoordZ.clear(); itsAtomPtrs.clear();
 	deviceMemLoadedEnergy = false; deviceMemLoadedClash = false; deviceMemLoadedAll = false;
 }
 
@@ -1525,13 +1525,37 @@ int protein::updateDeviceCoords()
 		if (!itsEnergyContext) {return 0;}
 	}
 
-	atomIterator aIter(this); int i = 0;
-	for (; !(aIter.last()) && i < N; aIter++, i++)
+	buildAtomIndex();
+	const int n = (int)itsAtomPtrs.size();
+	for (int i = 0; i < n; i++)
 	{
-		dblVec coords = aIter.getAtomPointer()->getCoords();
+		dblVec coords = itsAtomPtrs[i]->getCoords();
 		itsCoordX[i] = coords[0]; itsCoordY[i] = coords[1]; itsCoordZ[i] = coords[2];
 	}
-	return i;
+	return n;
+}
+
+void protein::buildAtomIndex()
+{
+	const int N = getNumAtoms();
+	if ((int)itsAtomPtrs.size() == N) {return;}
+	itsAtomPtrs.clear(); itsAtomPtrs.reserve(N);
+	atomIterator aIter(this); int i = 0;
+	for (; !(aIter.last()) && i < N; aIter++, i++)
+	{	itsAtomPtrs.push_back(aIter.getAtomPointer()); }
+}
+
+// A move only displaces atoms inside the changed set, so a delta has no reason
+// to re-read N coordinates out of the residue tree.
+void protein::refreshDeviceCoords(const std::vector<int>& _atoms)
+{
+	for (size_t k = 0; k < _atoms.size(); k++)
+	{
+		const int i = _atoms[k];
+		if (i < 0 || i >= (int)itsAtomPtrs.size()) {continue;}
+		dblVec coords = itsAtomPtrs[i]->getCoords();
+		itsCoordX[i] = coords[0]; itsCoordY[i] = coords[1]; itsCoordZ[i] = coords[2];
+	}
 }
 
 // Generate K random sidechain conformations for one residue, evaluate them all
@@ -2187,11 +2211,18 @@ double protein::protGetCutoffCU()
 
 int protein::protEnergyDeltaCU(double& _part, double& _torsion)
 {
-	int N = updateDeviceCoords();
-	if (N == 0) {return -1;}
-	// The delta must cover exactly the atoms whose occupancy is allowed to
-	// differ from the snapshot, which is the thaw set the move installed.
 	if (itsThawList.empty()) {return -1;}
+	buildEnergyContext();
+	if (!itsEnergyContext) {return -1;}
+	const int N = getNumAtoms();
+	if (N != (int)itsCoordX.size() || (int)itsAtomPtrs.size() != N)
+	{
+		if (updateDeviceCoords() == 0) {return -1;}
+	}
+	// The delta must cover exactly the atoms whose occupancy is allowed to
+	// differ from the snapshot, which is the thaw set the move installed, and
+	// nothing outside it can have moved.
+	refreshDeviceCoords(itsThawList);
 	return energyComputeDelta(itsEnergyContext, &itsCoordX[0], &itsCoordY[0],
 	                          &itsCoordZ[0], &itsThawList[0],
 	                          (int)itsThawList.size(), &_part, &_torsion);
