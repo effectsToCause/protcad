@@ -210,6 +210,19 @@ public:
 	double protEnergyCU();
 	double protEnergyCU(UInt _chainIndex);
 	void updateDielectricsCU();
+
+	// Frozen dielectric.  See energy.h.  Atom indices are in atomIterator
+	// order, the same ordering buildEnergyContext uses.
+	bool protFreezeDielectricCU();
+	bool protThawDielectricAllCU();
+	bool protThawDielectricNoneCU();
+	// Thaw every atom within _radius of any atom of the given residue.  This is
+	// the near-shell exemption the packing work is built on: the far field is
+	// held, the neighbourhood of the moved sidechain stays exact.  Returns the
+	// number of atoms thawed, or -1 on failure.
+	int protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _radius,
+	                             bool _accumulate = false);
+	void protReleaseDielectricCU();
 	void updateResidueEnergiesCU();
 	void updateResidueClashesCU();
 	UInt getNumHardBackboneClashesCU();

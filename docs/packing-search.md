@@ -279,3 +279,67 @@ all of them, and the colour classes widen because move independence is now set
 by the near shell rather than by the full 24.1 A dielectric radius.
 
 Status: measured, not implemented.
+
+## Implemented: the frozen dielectric is exact, not an approximation
+
+`energyFreezeDielectric` / `energySetDielectricThaw` / `energyReleaseDielectric`
+in `energy.cu`, with `protein::protFreezeDielectricCU` and
+`protThawDielectricNearCU` as the callable front end, and
+`tests/frozenDielectricTest.cc` as the guard.
+
+What is frozen is the **occupancy** field, not `eps`. Every part of the solvent
+model -- shell water count, water fraction, local dielectric, polar and
+nonpolar solvation -- is a function of that one number, so freezing occupancy
+freezes all of them consistently. Freezing `eps` alone would leave the
+solvation terms disagreeing with the dielectric that screens them.
+
+The measured section above framed this as a speed-for-accuracy trade. It is
+not. An atom's occupancy is a sum over the atoms inside a hydration shell of
+radius `r_i + effectiveWaterDiameter`, about 6.4 A for a heavy atom. A move can
+therefore only perturb the occupancy of atoms within roughly that distance of a
+moved atom's old or new position. Exempt those atoms and the held far field is
+not an estimate: those atoms kept exactly the value the coupled model would
+have computed, because nothing in their neighbourhood changed.
+
+Measured, rotating one sidechain by 120 degrees on every chi:
+
+| protein | atoms | 4 A | 6 A | 7 A | 8 A | 10 A |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1CRN | 648 | -2.2e-1 | +3.6e-1 | -1.7e-3 | exact (185) | exact (268) |
+| 1UBQ | 1404 | -1.9e0 | +1.7e-2 | -2.7e-2 | exact (351) | exact (497) |
+| 2LZM | 2996 | +3.1e0 | -5.2e-3 | +3.4e-2 | exact (259) | exact (396) |
+| 1AKE | 7814 | -5.0e0 | -2.5e-1 | -1.2e-2 | exact (324) | exact (536) |
+
+Error is against the fully coupled model in kcal/mol; the exempt set size is in
+parentheses. Freezing with no exemption at all costs 3.8 to 19.7 kcal/mol,
+which is the size of the error a naive global freeze would have introduced, and
+is consistent with the worst-atom drift of 38 to 46 percent measured above.
+
+"Exact" here means exact in exact arithmetic, the standard `energyComputeBatch`
+already documents. The residual is 1e-11 relative and comes from association,
+not modelling: the spatial sort is rebuilt after a move, so a held occupancy and
+a freshly computed one for the same undisturbed atom sum their neighbours in a
+different order. The residual does not grow with the size of the held region.
+
+Two consequences for the plan above.
+
+First, **the self-consistent outer loop is not needed for correctness.** It was
+introduced to make a frozen dielectric defensible; with a correct exemption it
+is defensible without iterating. The frozen field is not a mean field being
+converged, it is a cache of values that provably did not change.
+
+Second, the exempt set is constant in N: 185, 351, 259, 324 atoms across
+proteins from 648 to 7814 atoms. On 1AKE that is 4.1% of the structure. This is
+the same locality the drift measurement found and it is what makes the delta
+path worth building, since the dielectric-affected set was 93% of the delta cost
+in `docs/delta-energy.md` and was sized there at 148 atoms *conservatively but
+without exactness*. The honest exact figure is larger per move but N-independent
+and, unlike set B, it buys exactness rather than trading it away.
+
+The thaw set must be the union over the conformation before the move and the
+one after it, since an atom matters if the move brings a neighbour into its
+shell or takes one out. `protThawDielectricNearCU` accumulates for this reason.
+
+Status: implemented and tested. Not yet wired into any minimiser -- the full
+occupancy pass still runs, so this currently buys exactness and a correct
+exemption set, not wall clock. Consuming it is the delta path's job.

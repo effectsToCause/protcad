@@ -94,7 +94,8 @@ if(PROTCAD_BUILD_TESTS)
     set(PROTCAD_SELF_TESTS amberParamsTest batchTest bestfitTest energyTest
                            fusionTest replicaTest)
     # Need a structure argument.
-    set(PROTCAD_PDB_TESTS clashCheck energyTerms invarianceTest rotamerTest)
+    set(PROTCAD_PDB_TESTS clashCheck energyTerms frozenDielectricTest invarianceTest
+                          rotamerTest)
 
     file(GLOB PROTCAD_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cc)
     foreach(src ${PROTCAD_TEST_SOURCES})

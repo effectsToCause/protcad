@@ -2104,6 +2104,77 @@ void protein::updateDielectricsCU()
 	}
 }
 
+bool protein::protFreezeDielectricCU()
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return false;}
+	if (energyFreezeDielectric(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0]))
+	{
+		cout << "protein::protFreezeDielectricCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return false;
+	}
+	return true;
+}
+
+bool protein::protThawDielectricAllCU()
+{
+	if (!itsEnergyContext) {return false;}
+	return energySetDielectricThaw(itsEnergyContext, 0, -1, 0) == 0;
+}
+
+bool protein::protThawDielectricNoneCU()
+{
+	if (!itsEnergyContext) {return false;}
+	return energySetDielectricThaw(itsEnergyContext, 0, 0, 0) == 0;
+}
+
+int protein::protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _radius,
+                                      bool _accumulate)
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return -1;}
+
+	// Collect the moved residue's atoms first, then sweep once.  Done on the
+	// host because this is set-up, not the inner loop; a per-move version
+	// belongs on the device.
+	vector<UInt> targets;
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		if (aIter.getChainIndex() == (int)_chainIndex &&
+		    aIter.getResidueIndex() == (int)_resIndex) {targets.push_back(i);}
+	}
+	if (targets.empty()) {return -1;}
+
+	const double r2 = _radius * _radius;
+	vector<int> thaw;
+	for (int a = 0; a < N; a++)
+	{
+		for (UInt t = 0; t < targets.size(); t++)
+		{
+			const UInt b = targets[t];
+			const double dx = itsCoordX[a] - itsCoordX[b];
+			const double dy = itsCoordY[a] - itsCoordY[b];
+			const double dz = itsCoordZ[a] - itsCoordZ[b];
+			if (dx * dx + dy * dy + dz * dz <= r2) {thaw.push_back(a); break;}
+		}
+	}
+	if (energySetDielectricThaw(itsEnergyContext, thaw.empty() ? 0 : &thaw[0],
+	                            (int)thaw.size(), _accumulate ? 1 : 0))
+	{
+		cout << "protein::protThawDielectricNearCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return -1;
+	}
+	return energyDielectricThawCount(itsEnergyContext);
+}
+
+void protein::protReleaseDielectricCU()
+{
+	if (itsEnergyContext) {energyReleaseDielectric(itsEnergyContext);}
+}
+
 // The CPU minimisers and relaxers are gone; these names now route to the
 // kernel-backed implementations so callers keep working.
 void protein::protMin(bool _backbone) {protMinCU(_backbone);}

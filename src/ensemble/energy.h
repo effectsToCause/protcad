@@ -451,6 +451,50 @@ int energyComputeAtoms(energyContext* ctx,
                        double* totalOut, energyBreakdown* breakdown,
                        double* perAtomOut);
 
+// ---------------------------------------------------------------------------
+// Frozen dielectric
+// ---------------------------------------------------------------------------
+//
+// The local dielectric is the one many-body piece of this model, and it is what
+// makes a sidechain move expensive: moving one chi perturbs eps on far more
+// atoms than it moves, so every pair touching those atoms has to be re-summed.
+// See docs/packing-search.md for the measurement.
+//
+// These calls hold the occupancy field -- and therefore the shell water count,
+// the water fraction, the local dielectric and both solvation terms, which are
+// all functions of it -- fixed at a reference conformation, while allowing a
+// named set of atoms to be recomputed exactly.  Freezing occupancy rather than
+// eps keeps the solvation terms consistent with the dielectric screening them.
+//
+// Snapshot the occupancy field at the given coordinates and hold it.  Pass null
+// coordinates to use whatever is already resident on the device.  Thaws nothing
+// by default.  Returns 0 on success.
+int energyFreezeDielectric(energyContext* ctx,
+                           const double* x, const double* y, const double* z);
+
+// Choose which atoms are recomputed rather than held, by original-order index.
+// Passing a null list or a negative count thaws every atom, which must
+// reproduce the fully coupled energy exactly.
+//
+// With accumulate nonzero the atoms are added to the current set rather than
+// replacing it.  That matters for correctness, not convenience: a move changes
+// the occupancy of every atom whose hydration shell the moved atoms enter OR
+// leave, so an exact thaw set is the union taken over the conformation before
+// the move and the conformation after it.  Building it from one conformation
+// alone is exact only when the move is small.
+int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
+                            int accumulate);
+
+// How many atoms are currently thawed.  Reports the union, so it is the number
+// to quote when sizing the exemption; a single call's own list is not it.
+int energyDielectricThawCount(const energyContext* ctx);
+
+// Return to the fully coupled model.
+int energyReleaseDielectric(energyContext* ctx);
+
+// Nonzero if a frozen field is currently in force.
+int energyDielectricFrozen(const energyContext* ctx);
+
 // Export the per-atom local dielectric and shell water count for the supplied
 // coordinates.  Both arrays are indexed in the caller's original atom order and
 // must have room for topology.numAtoms doubles; either may be null.  Silent

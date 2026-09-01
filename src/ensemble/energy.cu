@@ -129,6 +129,20 @@ struct energyContext
 
     // Intermediates and outputs, sorted order.
     ereal *d_occ;                 // occluded shell volume
+
+    // Frozen dielectric field.  The whole solvent model -- shell waters, water
+    // fraction, local dielectric, and both solvation terms -- is a function of
+    // this one occupancy number, so freezing occupancy freezes all of them
+    // mutually consistently.  Freezing eps alone would leave the solvation
+    // terms disagreeing with the dielectric that screens them.
+    //
+    // Held in ORIGINAL atom order, not sorted order: the spatial sort is
+    // rebuilt whenever coordinates move, so a sorted-order snapshot would be
+    // silently rebound to different atoms on the next evaluation.
+    ereal *d_occFrozen;
+    unsigned char *d_thaw;        // 1 = recompute this atom, 0 = use frozen
+    std::vector<unsigned char> h_thaw;   // host mirror, so thaw sets can be unioned
+    int    freezeActive;
     ereal *d_eVdw, *d_eEle, *d_eSolvP, *d_eSolvN, *d_eSolvS;
     int   *d_clash;
 
@@ -1001,6 +1015,53 @@ __global__ void kReduceOcc(int nCand, int nPad, int jSplit,
     occ[idx] = a;
 }
 
+// --- frozen dielectric ---------------------------------------------------
+//
+// Scatter a freshly computed occupancy field from sorted order into the
+// original-order snapshot buffer.  Padding slots carry sorig == -1 and are
+// skipped.
+__global__ void kSnapshotOcc(int nPad, int N,
+                             const int* __restrict__ sorig,
+                             const ereal* __restrict__ occ,
+                             ereal* __restrict__ occFrozen)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nPad) return;
+    const int o = sorig[s];
+    if (o < 0 || o >= N) return;
+    occFrozen[o] = occ[s];
+}
+
+// Gather the frozen occupancy back over the freshly computed one, except for
+// the atoms flagged for recomputation.  Those keep their live value, so the
+// near shell around a moved sidechain stays exact while the far field is held.
+__global__ void kApplyFrozenOcc(int nCand, int nPad, int N,
+                                const int* __restrict__ sorig,
+                                const ereal* __restrict__ occFrozen,
+                                const unsigned char* __restrict__ thaw,
+                                ereal* __restrict__ occ)
+{
+    const size_t total = (size_t)nCand * nPad;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    const int s = (int)(idx % (size_t)nPad);   // candidates share one sort
+    const int o = sorig[s];
+    if (o < 0 || o >= N) return;
+    if (thaw[o]) return;
+    occ[idx] = occFrozen[o];
+}
+
+// Overwrite the frozen far field in place.  Returns nothing: a failure here is
+// reported by the caller's next CUDA_OK.
+static void applyFreeze(energyContext* ctx, int nCand, ereal* occ)
+{
+    if (!ctx->freezeActive) return;
+    const size_t total = (size_t)nCand * ctx->nPad;
+    kApplyFrozenOcc<<<(int)((total + 255) / 256), 256>>>(
+        nCand, ctx->nPad, ctx->N, ctx->d_sorig,
+        ctx->d_occFrozen, ctx->d_thaw, occ);
+}
+
 __global__ void kReduceParts(int nCand, int nPad, int jSplit,
                              const ereal* __restrict__ part,
                              ereal* __restrict__ eVdw,
@@ -1202,7 +1263,9 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_x = ctx->d_y = ctx->d_z = 0;
     ctx->d_sx = ctx->d_sy = ctx->d_sz = 0;
     ctx->d_srad = ctx->d_ssqrtEps = ctx->d_schg = ctx->d_sselfVol = 0;
-    ctx->d_tileLo = ctx->d_tileHi = ctx->d_occ = 0;
+    ctx->d_tileLo = ctx->d_tileHi = ctx->d_occ = ctx->d_occFrozen = 0;
+    ctx->d_thaw = 0;
+    ctx->freezeActive = 0;
     ctx->d_eVdw = ctx->d_eEle = ctx->d_eSolvP = ctx->d_eSolvN = ctx->d_eSolvS = 0;
     ctx->d_resIndex = ctx->d_exclCount = ctx->d_exclList = ctx->d_exclSpan = 0;
     ctx->d_order = ctx->d_sresIndex = ctx->d_sorig = ctx->d_clash = 0;
@@ -1254,6 +1317,8 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ok &= devAlloc(&ctx->d_ssilent, nPad);
     ok &= devAlloc(&ctx->d_tileLo, 3 * nT) && devAlloc(&ctx->d_tileHi, 3 * nT);
     ok &= devAlloc(&ctx->d_occ, nPad);
+    ok &= devAlloc(&ctx->d_occFrozen, nPad);
+    ok &= devAlloc(&ctx->d_thaw, nPad);
     ok &= devAlloc(&ctx->d_eVdw, nPad) && devAlloc(&ctx->d_eEle, nPad);
     ok &= devAlloc(&ctx->d_eSolvP, nPad) && devAlloc(&ctx->d_eSolvN, nPad);
     ok &= devAlloc(&ctx->d_eSolvS, nPad);
@@ -1390,6 +1455,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_sx, ctx->d_sy, ctx->d_sz, ctx->d_srad, ctx->d_ssqrtEps,
         ctx->d_schg, ctx->d_sselfVol, ctx->d_sresIndex, ctx->d_sorig,
         ctx->d_ssilent, ctx->d_tileLo, ctx->d_tileHi, ctx->d_occ,
+        ctx->d_occFrozen, ctx->d_thaw,
         ctx->d_eVdw, ctx->d_eEle, ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS,
         ctx->d_clash, ctx->d_cellOf, ctx->d_cellCount, ctx->d_cellStart,
         ctx->d_cellCursor,
@@ -1774,6 +1840,119 @@ static bool ensurePart(energyContext* ctx, int nCand)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Frozen dielectric
+// ---------------------------------------------------------------------------
+//
+// Measured motivation, from projects/rotamerRank.cc: rotating one sidechain
+// moves the dielectric of the rest of the structure by 0.19-0.71% on average,
+// but moves the worst-affected environment atom by 38-46%.  So a global freeze
+// is not safe -- it would be wrong exactly at the contacts that decide a
+// packing -- while a freeze that exempts the near shell is.  The number of
+// environment atoms that move more than 1% is about 65 and does not grow with
+// the protein (51 on 1CRN, 65 on 1UBQ, 66 on 2LZM), so the exempt set is a
+// constant, not a fraction of N.
+
+int energyFreezeDielectric(energyContext* ctx,
+                           const double* x, const double* y, const double* z)
+{
+    if (!ctx) return -1;
+    const int nPad = ctx->nPad, nT = ctx->nTiles;
+
+    // Snapshot the true field, never a held one: freezing twice in a row must
+    // not laminate an old far field into the new snapshot.
+    ctx->freezeActive = 0;
+
+    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
+    if (buildOrder(ctx) != 0) return -1;
+
+    const ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
+                    ? ereal(4.188) : ereal(4.1887902048);
+
+    CUDA_OK(ctx, cudaMemset(ctx->d_occ, 0, nPad * sizeof(ereal)));
+    if (!ensurePart(ctx, 1)) {
+        setError(ctx, "energyFreezeDielectric", "out of memory for j-split partials",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    const int jSplit = ctx->jSplit;
+    const int blocks = (nT + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+    dim3 gOcc(blocks, 1, jSplit);
+    kOccupancy<<<gOcc, BLOCK>>>(nT, ctx->d_sx, ctx->d_sy, ctx->d_sz,
+                                ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
+                                ctx->d_tileLo, ctx->d_tileHi,
+                                ctx->p, v43, ctx->p.occupancy, 1, jSplit,
+                                ctx->d_part);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
+                                                   ctx->d_part, ctx->d_occ);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    kSnapshotOcc<<<(int)((nPad + 255) / 256), 256>>>(nPad, ctx->N, ctx->d_sorig,
+                                                     ctx->d_occ, ctx->d_occFrozen);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+
+    // Default to thawing nothing.  A caller that wants the fully coupled model
+    // back should release rather than thaw everything, but thawing everything
+    // is supported and must reproduce the coupled energy exactly -- that
+    // equivalence is the regression test for this whole path.
+    CUDA_OK(ctx, cudaMemset(ctx->d_thaw, 0, nPad * sizeof(unsigned char)));
+    ctx->h_thaw.assign(nPad, 0);
+    ctx->freezeActive = 1;
+    return 0;
+}
+
+int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
+                            int accumulate)
+{
+    if (!ctx) return -1;
+    if (ctx->h_thaw.size() != (size_t)ctx->nPad) ctx->h_thaw.assign(ctx->nPad, 0);
+    std::vector<unsigned char>& mask = ctx->h_thaw;
+    if (!accumulate) std::fill(mask.begin(), mask.end(), (unsigned char)0);
+    if (!atoms || count < 0)
+    {
+        std::fill(mask.begin(), mask.begin() + ctx->N, (unsigned char)1);
+    }
+    else
+    {
+        for (int k = 0; k < count; ++k)
+        {
+            const int a = atoms[k];
+            if (a < 0 || a >= ctx->N)
+            {
+                setError(ctx, "energySetDielectricThaw", "atom index out of range",
+                         __FILE__, __LINE__);
+                return -1;
+            }
+            mask[a] = 1;
+        }
+    }
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_thaw, &mask[0],
+                            ctx->nPad * sizeof(unsigned char),
+                            cudaMemcpyHostToDevice));
+    return 0;
+}
+
+int energyDielectricThawCount(const energyContext* ctx)
+{
+    if (!ctx) return -1;
+    if (ctx->h_thaw.size() != (size_t)ctx->nPad) return 0;
+    int n = 0;
+    for (int i = 0; i < ctx->N; ++i) if (ctx->h_thaw[i]) ++n;
+    return n;
+}
+
+int energyReleaseDielectric(energyContext* ctx)
+{
+    if (!ctx) return -1;
+    ctx->freezeActive = 0;
+    return 0;
+}
+
+int energyDielectricFrozen(const energyContext* ctx)
+{
+    return ctx ? ctx->freezeActive : 0;
+}
+
 static int energyComputeImpl(energyContext* ctx,
                              const double* x, const double* y, const double* z,
                              double* totalOut, energyBreakdown* breakdown,
@@ -1812,6 +1991,8 @@ static int energyComputeImpl(energyContext* ctx,
         CUDA_OK(ctx, cudaPeekAtLastError());
         kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
                                                        ctx->d_part, ctx->d_occ);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        applyFreeze(ctx, 1, ctx->d_occ);
         CUDA_OK(ctx, cudaPeekAtLastError());
     }
 
@@ -2239,6 +2420,8 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
         const size_t tot = (size_t)nCand * nPad;
         kReduceOcc<<<(int)((tot + 255) / 256), 256>>>(nCand, nPad, jSplit,
                                                       ctx->d_part, ctx->d_bocc);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        applyFreeze(ctx, nCand, ctx->d_bocc);
         CUDA_OK(ctx, cudaPeekAtLastError());
     }
 
@@ -2682,6 +2865,8 @@ int shellCompute(energyContext* ctx,
         CUDA_OK(ctx, cudaPeekAtLastError());
         kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
                                                        ctx->d_part, ctx->d_occ);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        applyFreeze(ctx, 1, ctx->d_occ);
         CUDA_OK(ctx, cudaPeekAtLastError());
     }
 
