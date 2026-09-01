@@ -1,0 +1,5 @@
+structure,atoms,pairs,avgNbr,movedA,dynamicC,staticC,dynamicSpeedup,staticSpeedup
+1CRN,648,96243,297.0,8.9,107,226,3.0,1.4
+1UBQ,1404,284249,404.9,11.0,140,345,5.0,2.0
+2LZM,2996,685783,457.8,10.8,145,380,10.3,3.9
+1AKE,7814,1899584,486.2,10.6,148,385,26.4,10.2
