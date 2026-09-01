@@ -191,10 +191,91 @@ is cheap to test and everything else depends on it.
 
 ## Suggested order
 
-1. Confirm on one protein that a frozen-dielectric pairwise surrogate ranks
-   rotamers consistently with the full model. If it does not, the whole
-   approach needs rethinking and it is better to learn that first.
+1. DONE, see above. Frozen far field with a recomputed near shell, not a global
+   freeze; and do not drop solvation, which misranks in the near-native band.
 2. Build the pair table on the GPU for a fixed dielectric.
 3. DEE prune, then simulated annealing over the table.
 4. Wrap in the self-consistent outer loop.
 5. Exact refinement using the delta path.
+
+## Measured: how much of the model can be frozen
+
+`projects/rotamerRank.cc` answers step 1. For each flexible residue it samples
+chi uniformly, evaluates the full per-term breakdown for every sample, and asks
+how well a reduced score reproduces the full model's ordering. It also exports
+the per-atom dielectric field via `updateDielectricsCU` and measures how far
+that field actually moves when one sidechain rotates.
+
+Two different claims have to be kept apart, because they are not the same
+strength and they do not get the same answer:
+
+* **Drop solvation** and rank on van der Waals. Much stronger.
+* **Freeze the dielectric** across an outer iteration. Every solvation and
+  electrostatic term is still evaluated; only `eps` lags. Much milder.
+
+### Ranking on van der Waals alone does not work
+
+`rotamerRank <pdb> 400 1`, seed 1:
+
+| protein | regime | mean rho | top-1 | top-5 |
+| --- | --- | ---: | ---: | ---: |
+| 1UBQ | all samples | +0.991 | 20.0% | 53.8% |
+| 1UBQ | near-native | +0.667 | 15.0% | 50.0% |
+| 1CRN | all samples | +0.983 | 46.9% | 87.5% |
+| 1CRN | near-native | +0.765 | 34.5% | 65.5% |
+| 2LZM | all samples | +0.995 | 51.1% | 82.2% |
+| 2LZM | near-native | +0.685 | 38.2% | 70.9% |
+
+The rank correlation over all samples looks superb and means nothing. Uniform
+chi sampling produces a mean van der Waals spread of about 1.2e7 kcal/mol, so
+almost every sample is a catastrophic clash and every scoring function agrees
+that garbage is garbage. That inflates rho without conferring any ability to
+pack.
+
+Restricted to the band within 10 kcal/mol of the best sampled van der Waals --
+the conformations among which the packing is actually decided -- rho falls to
+0.67 to 0.77 and the correct rotamer is picked 15 to 38 percent of the time.
+
+So the intuition that van der Waals dominates is right about *where* it is
+right: clashes are an overwhelming signal no other term can offset. But that is
+the regime a minimiser leaves in its first few sweeps. In the near-native regime
+where the answer is settled, the electrostatic spread (33 kcal/mol on 1UBQ)
+exceeds the residual van der Waals spread, and dropping solvation misranks.
+Adding the torsion term helps a little and is free, but does not rescue it.
+
+### Freezing the dielectric does work, if the near shell is exempt
+
+The weaker claim survives. Under a near-native rotamer change:
+
+| protein | atoms | mean drift, environment | moved residue | env atoms >1% | >5% |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1CRN | 648 | 0.71% | 14.9% | 50.9 | 18.1 |
+| 1UBQ | 1404 | 0.37% | 16.3% | 65.0 | 24.4 |
+| 2LZM | 2996 | 0.19% | 22.5% | 65.7 | 24.2 |
+
+The mean environment drift is a fraction of a percent and falls as the protein
+grows, simply because the far field dilutes. But the worst environment atom
+moves 38 to 46 percent, so a naive global freeze is not safe: it would be wrong
+precisely at the contacts that decide the packing.
+
+The useful result is the last two columns. **The set of environment atoms whose
+dielectric moves at all is essentially constant in N** -- about 65 atoms above
+one percent and 24 above five percent, unchanged from 648 to 2996 atoms. The
+dielectric response is local, and it does not grow with the protein.
+
+That reshapes the design. The right scheme is not "coupled" or "frozen" but
+frozen far field with a recomputed near shell: hold `eps` fixed everywhere
+except a small neighbourhood of the moved sidechain, and refresh that
+neighbourhood exactly. The exempt set is roughly 65 atoms, well under half the
+148-atom conservative dielectric-affected set B measured in
+`docs/delta-energy.md`, and unlike set B it does not scale.
+
+This lands between the two columns of the unlock table above rather than at the
+frozen extreme. The frozen 368.6x on 1AKE was always an upper bound that assumed
+`eps` never had to be touched; the honest expectation is roughly half the
+dielectric work of the coupled path with the far field exact by construction.
+The pair table is exact for every pair outside the near shell, which is almost
+all of them, and the colour classes widen because move independence is now set
+by the near shell rather than by the full 24.1 A dielectric radius.
+
+Status: measured, not implemented.
