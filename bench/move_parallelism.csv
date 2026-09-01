@@ -1,0 +1,13 @@
+structure,flexRes,criterion,separation,colours,avgClassSize
+1CRN,32,contact,6.0,6,5.3
+1CRN,32,vdWonly,12.0,16,2.0
+1CRN,32,exact,24.1,30,1.1
+1UBQ,64,contact,6.0,8,8.0
+1UBQ,64,vdWonly,12.0,20,3.2
+1UBQ,64,exact,24.1,55,1.2
+2LZM,134,contact,6.0,7,19.1
+2LZM,134,vdWonly,12.0,20,6.7
+2LZM,134,exact,24.1,67,2.0
+1AKE,324,contact,6.0,8,40.5
+1AKE,324,vdWonly,12.0,22,14.7
+1AKE,324,exact,24.1,73,4.4

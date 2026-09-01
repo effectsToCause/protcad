@@ -121,6 +121,74 @@ becomes the exact rescoring and refinement pass that runs after the tabulated
 search has done the heavy lifting, and it is what handles anything the table
 cannot represent.
 
+## Filling the GPU rather than reducing the work
+
+A fair objection to all of the above: a 600-atom protein occupies about 19
+warps on 1280 cores, so the GPU is mostly idle and the problem may be
+under-decomposition rather than excess work. Three ways to fill it, in
+increasing order of how well they survive scrutiny.
+
+**More candidates per move.** Already done: `bestSidechainCandidateCU`
+evaluates 32, and a 64-batch on 1ubq costs only 4.3x a single evaluation, so
+throughput is roughly 15x. But best-of-K spends K evaluations to advance one
+degree of freedom, and returns diminish quickly: for the 24-rotamer residues a
+32-candidate batch is already close to exhaustive. This axis is saturated.
+
+**More replicas.** Measured and rejected; see `protMinReplicaCU`. A population
+advances K chains one step each rather than one chain K steps, and for
+minimisation that is a loss.
+
+**Simultaneous moves at different residues.** This is the textbook way to
+parallelise a Markov chain exactly: colour the interaction graph and update a
+whole colour class at once, since moves within a class are additive and
+detailed balance is preserved. Measured by `scripts/move_parallelism.py` into
+`bench/move_parallelism.csv`, as average residues per colour class:
+
+| structure | contact 6 A | vdW only 12 A | exact 24.1 A |
+|---|---|---|---|
+| 1CRN | 5.3  | 2.0  | 1.1 |
+| 1UBQ | 8.0  | 3.2  | 1.2 |
+| 2LZM | 19.1 | 6.7  | 2.0 |
+| 1AKE | 40.5 | 14.7 | 4.4 |
+
+The exact criterion is 24.1 A because a move perturbs the dielectric within
+6.05 A of every displaced atom, and a perturbed dielectric rescreens pairs out
+to the full 12 A cutoff. Globular proteins are barely larger than that, so
+under protcad's real energy almost nothing is independent: 1.1 residues per
+class on 1CRN. Exact move parallelism does not exist here.
+
+## The same term blocks all three routes
+
+It is worth stating plainly, because it turned up independently three times:
+
+* it is 93% of the cost of an incremental evaluation (`docs/delta-energy.md`),
+* it makes the rotamer pair table inexact,
+* and it collapses parallel move classes from 14.7 to 4.4 on 1ake, and to
+  essentially 1 on small proteins.
+
+All three are the local-dielectric solvation term. It is the single thing
+standing between protcad and the standard packing machinery.
+
+Which means freezing it does not buy one win, it buys all of them at once. With
+`eps` held fixed over an outer iteration, the delta's affected set collapses
+from about 148 atoms to the roughly 11 that actually moved:
+
+| structure | delta, dielectric coupled | delta, dielectric frozen |
+|---|---|---|
+| 1CRN | 3.0x  | 36.4x  |
+| 1UBQ | 5.0x  | 63.8x  |
+| 2LZM | 10.3x | 138.7x |
+| 1AKE | 26.4x | 368.6x |
+
+and simultaneously the pair table becomes exact and the colour classes widen to
+the 12 A column above. The self-consistent outer loop is therefore not a
+concession to make one method work; it is the hinge the whole acceleration
+strategy turns on, and its cost is a handful of outer iterations.
+
+The one thing that must be established first is whether a frozen dielectric
+ranks rotamers consistently with the full model over an outer iteration. That
+is cheap to test and everything else depends on it.
+
 ## Suggested order
 
 1. Confirm on one protein that a frozen-dielectric pairwise surrogate ranks
