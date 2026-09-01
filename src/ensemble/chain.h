@@ -71,6 +71,8 @@ public:
 	void mutateWithoutBuffering(const UInt _indexInChain, const UInt _aaType);
     void fixBrokenResidue(const UInt _indexInChain);
     void rebuildResidue(const UInt _indexInChain);
+	void restoreNativeCoords(residue* _res, const vector<UInt>& _nativeIndex,
+	                         const vector<dblVec>& _nativeCoord);
 	void rebuildResiduesInChain();
 	bool isDAminoAcid(residue* currentRes);
 	void redoModification(chainModBuffer _redoBuffer);

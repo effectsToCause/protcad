@@ -173,7 +173,14 @@ int main(int argc, char** argv)
 	// the parameters or the build applied to a PDB.  The tolerance is loose
 	// enough to absorb float reduction order but tight enough to catch a term
 	// being dropped or double counted.
-	const double refEnergy = 510.98;
+	// Updated when the PDB load stopped idealising the input.  The rebuild used
+	// to replace every atom from the residue template, keeping only the
+	// measured torsions, so this pinned the energy of an idealised 1crn rather
+	// than of 1crn.  The structure now keeps its deposited coordinates, which
+	// relieves the strain idealisation had introduced: 510.98 -> 492.79.  The
+	// clash count rises because real close contacts survive that the template
+	// rebuild had quietly relaxed away.
+	const double refEnergy = 492.79;
 	const double refTol    = 0.05;
 	if (fabs(ref.energy - refEnergy) > refTol)
 	{
@@ -188,7 +195,7 @@ int main(int argc, char** argv)
 		          << " kcal/mol, within " << refTol << " of " << refEnergy << std::endl;
 	}
 
-	const unsigned int refClashes = 450;
+	const unsigned int refClashes = 457;
 	if (ref.clashes != refClashes)
 	{
 		std::cout << "FAIL 1crn reference clashes: " << ref.clashes

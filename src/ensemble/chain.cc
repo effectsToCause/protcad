@@ -416,8 +416,99 @@ void chain::fixBrokenResidue(const UInt _indexInChain)
 	}
 }
 
-void chain::rebuildResidue(const UInt _indexInChain)
-{	if (_indexInChain < itsResidues.size())
+// Map an atom the input file did not supply onto the native frame.
+//
+// After the file's own coordinates are restored, atoms that came from the
+// residue template (hydrogens, and any heavy atom the file omitted) are still
+// positioned in the idealised frame the template built.  Where the input's
+// geometry departs from ideal that leaves them stranded: an N-H can end up a
+// few tenths of an Angstrom from its own nitrogen, which the nonbonded sum
+// reads as a hard clash.
+//
+// Rather than rebuild them from internal coordinates, carry each one across on
+// the local rigid motion implied by its three nearest file-supplied atoms.
+// Three points fix a frame, so this needs no SVD and it reproduces the atom's
+// position relative to those neighbours exactly.
+static bool localFrame(const dblVec& p0, const dblVec& p1, const dblVec& p2,
+                       dblVec& e1, dblVec& e2, dblVec& e3)
+{
+	e1 = p1 - p0;
+	double n1 = sqrt(CMath::dotProduct(e1, e1));
+	if (n1 < 1.0e-6) {return false;}
+	e1 = e1 / n1;
+
+	dblVec v = p2 - p0;
+	e2 = v - e1 * CMath::dotProduct(v, e1);
+	double n2 = sqrt(CMath::dotProduct(e2, e2));
+	if (n2 < 1.0e-6) {return false;}
+	e2 = e2 / n2;
+
+	e3 = CMath::cross(e1, e2);
+	return true;
+}
+
+void chain::restoreNativeCoords(residue* _res,
+                                const vector<UInt>& _nativeIndex,
+                                const vector<dblVec>& _nativeCoord)
+{
+	UInt numAtoms = _res->getNumAtoms();
+
+	// Idealised positions, captured before anything is overwritten.
+	vector<dblVec> ideal;
+	for (UInt a = 0; a < numAtoms; a++) {ideal.push_back(_res->getCoords(a));}
+
+	vector<bool> supplied(numAtoms, false);
+	for (UInt a = 0; a < _nativeIndex.size(); a++)
+	{	UInt idx = _nativeIndex[a];
+		if (idx < numAtoms)
+		{	_res->setCoords(idx, _nativeCoord[a]);
+			_res->getAtom(idx)->setIsFullySpecified();
+			supplied[idx] = true;
+		}
+	}
+
+	// Three anchors are the minimum that fixes a frame; with fewer the
+	// template position is the best available answer.
+	vector<UInt> anchor;
+	for (UInt a = 0; a < numAtoms; a++) {if (supplied[a]) {anchor.push_back(a);}}
+	if (anchor.size() < 3) {return;}
+
+	for (UInt a = 0; a < numAtoms; a++)
+	{
+		if (supplied[a]) {continue;}
+
+		// Three nearest anchors, ranked in the frame they were built in.
+		UInt best[3] = {0, 0, 0};
+		double bestD[3] = {1.0e30, 1.0e30, 1.0e30};
+		for (UInt k = 0; k < anchor.size(); k++)
+		{	dblVec d = ideal[anchor[k]] - ideal[a];
+			double dd = CMath::dotProduct(d, d);
+			if (dd < bestD[0])
+			{	bestD[2]=bestD[1]; best[2]=best[1];
+				bestD[1]=bestD[0]; best[1]=best[0];
+				bestD[0]=dd;       best[0]=anchor[k]; }
+			else if (dd < bestD[1])
+			{	bestD[2]=bestD[1]; best[2]=best[1];
+				bestD[1]=dd;       best[1]=anchor[k]; }
+			else if (dd < bestD[2])
+			{	bestD[2]=dd;       best[2]=anchor[k]; }
+		}
+
+		dblVec i1(3), i2(3), i3(3), n1(3), n2(3), n3(3);
+		if (!localFrame(ideal[best[0]], ideal[best[1]], ideal[best[2]], i1, i2, i3)) {continue;}
+		if (!localFrame(_res->getCoords(best[0]), _res->getCoords(best[1]),
+		                _res->getCoords(best[2]), n1, n2, n3)) {continue;}
+
+		dblVec rel = ideal[a] - ideal[best[0]];
+		double c1 = CMath::dotProduct(rel, i1);
+		double c2 = CMath::dotProduct(rel, i2);
+		double c3 = CMath::dotProduct(rel, i3);
+
+		_res->setCoords(a, _res->getCoords(best[0]) + n1*c1 + n2*c2 + n3*c3);
+	}
+}
+
+void chain::rebuildResidue(const UInt _indexInChain){	if (_indexInChain < itsResidues.size())
 	{
 		vector < vector <double> > currentRot;
 		residue* pOldRes = itsResidues[_indexInChain];
@@ -431,9 +522,47 @@ void chain::rebuildResidue(const UInt _indexInChain)
 		// where the protein sat in space.
 		currentRot = pOldRes->getMeasurableSidechainDihedralAngles();
 		bool fliptoD = isDAminoAcid(pOldRes);
+
+		// Keep the coordinates the file actually supplied.
+		//
+		// The rebuild below reconstructs every atom from the residue template,
+		// so only torsions survive the round trip: the input's bond lengths and
+		// angles are replaced by idealised ones.  On a well refined structure
+		// that is a small correction, but the displacement accumulates along a
+		// sidechain, and on older or low resolution entries it is not small at
+		// all.  Restoring the file's coordinates for the atoms that came from
+		// the file keeps the geometry as deposited while still letting the
+		// template supply the atoms the file omitted, which is almost always
+		// hydrogens.  The energy has no bond stretch or angle bend term, so
+		// non-ideal internal geometry costs nothing here.
+		//
+		// Only meaningful when the atom indexing is preserved, i.e. when the
+		// residue is rebuilt as the same type.  The D-amino flip changes type,
+		// so it keeps the old behaviour.
+		// On by default: the deposited coordinates are the measurement, and
+		// idealising them injects strain that was never in the structure.
+		// Set PROTCAD_IDEALISE_XYZ to recover the old rebuild-everything
+		// behaviour.
+		static const bool nativeXYZ = (getenv("PROTCAD_IDEALISE_XYZ") == 0);
+		vector<UInt> nativeIndex;
+		vector<dblVec> nativeCoord;
+		if (nativeXYZ && !fliptoD)
+		{	for (UInt a = 0; a < pOldRes->getNumAtoms(); a++)
+			{	if (pOldRes->getAtom(a)->isFullySpecified())
+				{	nativeIndex.push_back(a);
+					nativeCoord.push_back(pOldRes->getCoords(a));
+				}
+			}
+		}
+
 		if (fliptoD){itsResidues[_indexInChain] = pOldRes->mutateNew(itsResType+Daa);}
 		else{itsResidues[_indexInChain] = pOldRes->mutateNew(itsResType);}
 		setSidechainDihedralAngles(_indexInChain, currentRot);
+
+		if (!nativeIndex.empty())
+		{	restoreNativeCoords(itsResidues[_indexInChain], nativeIndex, nativeCoord);
+		}
+
 		itsResidues[_indexInChain]->isArtificiallyBuilt = true;
 		delete pOldRes;
 	}
