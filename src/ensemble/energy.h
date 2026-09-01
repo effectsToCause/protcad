@@ -305,6 +305,9 @@ void energyDestroy(energyContext* ctx);
 
 // Change parameters without reallocating.  Topology must not change.
 void energySetParams(energyContext* ctx, const energyParams& params);
+// Read back what the context is currently using, so a caller can vary one
+// field without having to reconstruct the rest from the defaults.
+const energyParams& energyGetParams(energyContext* ctx);
 
 // Mark atoms as silent (excluded) without rebuilding the context.
 void energySetSilent(energyContext* ctx, const unsigned char* silent);
@@ -487,6 +490,8 @@ int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
 
 // How many atoms are currently thawed.  Reports the union, so it is the number
 // to quote when sizing the exemption; a single call's own list is not it.
+double energyDielectricInfluenceRadius(energyContext* ctx);
+
 int energyDielectricThawCount(const energyContext* ctx);
 
 // Return to the fully coupled model.

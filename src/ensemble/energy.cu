@@ -92,6 +92,7 @@ struct energyContext
 
     // Static per-atom properties, original order.
     ereal *d_rad, *d_sqrtEps, *d_chg, *d_selfVol;
+    ereal maxRadius;   // largest atomic radius, sets the exemption radius
     int   *d_resIndex;
     unsigned char *d_silent;
     int   *d_exclCount, *d_exclList, *d_exclSpan;
@@ -1260,6 +1261,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     // undefined behaviour here because the context holds a std::vector and a
     // std::string.
     ctx->d_rad = ctx->d_sqrtEps = ctx->d_chg = ctx->d_selfVol = 0;
+    ctx->maxRadius = ereal(0);
     ctx->d_x = ctx->d_y = ctx->d_z = 0;
     ctx->d_sx = ctx->d_sy = ctx->d_sz = 0;
     ctx->d_srad = ctx->d_ssqrtEps = ctx->d_schg = ctx->d_sselfVol = 0;
@@ -1392,6 +1394,10 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     std::vector<int> resIdx(N, 0);
     if (topo.residueIndex) memcpy(&resIdx[0], topo.residueIndex, N * sizeof(int));
 
+    ctx->maxRadius = ereal(0);
+    for (int a = 0; a < N; a++)
+        if (rad[a] > ctx->maxRadius) ctx->maxRadius = rad[a];
+
     cudaMemcpy(ctx->d_rad, &rad[0], N * sizeof(ereal), cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_sqrtEps, &sqrtEps[0], N * sizeof(ereal), cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_chg, &chg[0], N * sizeof(ereal), cudaMemcpyHostToDevice);
@@ -1485,6 +1491,14 @@ void energySetParams(energyContext* ctx, const energyParams& params)
 {
     if (ctx) ctx->p = params;
 }
+
+const energyParams& energyGetParams(energyContext* ctx)
+{
+    static energyParams fallback = defaultEnergyParams();
+    if (!ctx) return fallback;
+    return ctx->p;
+}
+
 
 void energySetSilent(energyContext* ctx, const unsigned char* silent)
 {
@@ -1930,6 +1944,18 @@ int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
                             ctx->nPad * sizeof(unsigned char),
                             cudaMemcpyHostToDevice));
     return 0;
+}
+
+double energyDielectricInfluenceRadius(energyContext* ctx)
+{
+    if (!ctx || ctx->N == 0) return 0.0;
+    // kOccupancy accumulates neighbour j into atom i when
+    //     |xi - xj| < (r_i + effectiveWaterDiameter) + r_j.
+    // So moving an atom can only disturb the occupancy of atoms within
+    // 2 * maxRadius + effectiveWaterDiameter of where it was or where it went.
+    // Exempting that ball is sufficient, and it is the smallest radius for
+    // which sufficiency is guaranteed rather than merely observed.
+    return (double)(ereal(2) * ctx->maxRadius + ctx->p.effectiveWaterDiameter);
 }
 
 int energyDielectricThawCount(const energyContext* ctx)

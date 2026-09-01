@@ -343,3 +343,78 @@ shell or takes one out. `protThawDielectricNearCU` accumulates for this reason.
 Status: implemented and tested. Not yet wired into any minimiser -- the full
 occupancy pass still runs, so this currently buys exactness and a correct
 exemption set, not wall clock. Consuming it is the delta path's job.
+
+## Measured: the exemption radius is derivable, and the 12 A cutoff is not where the time goes
+
+Two things were settled before writing the delta kernel, because both change
+what the delta is worth.
+
+### The exemption radius follows from the occupancy kernel
+
+`kOccupancy` accumulates neighbour `j` into atom `i` when
+
+    |x_i - x_j| < (r_i + effectiveWaterDiameter) + r_j
+
+The neighbour's own radius is in the test, which the first estimate missed. So
+a moved atom can perturb the occupancy of atoms out to
+`2 * maxRadius + effectiveWaterDiameter`, not `maxRadius + effectiveWaterDiameter`.
+That is 8.35 A for a protein, and it is why the empirical sweep found exactness
+at 8 A and not at 7 A. The 8 A used earlier was not over-insurance, it was very
+slightly short. `energyDielectricInfluenceRadius` now returns the derived value,
+so the radius is no longer a tuned constant.
+
+25 random single-chi moves of 30-150 degrees, thawing around the atoms that
+actually moved, error relative to a coupled evaluation at identical coordinates:
+
+| radius | 1CRN exact | 1UBQ | 2LZM | 1AKE | worst rel err |
+|---|---|---|---|---|---|
+| 6.0 A  | 3/25  | 3/25  | 2/25  | 1/25  | 1e-4 |
+| 7.0 A  | 3/25  | 3/25  | 2/25  | 1/25  | 2e-5 |
+| 7.85 A | 23/25 | 23/25 | 21/25 | 21/25 | 2e-8 |
+| 8.35 A | 25/25 | 24/25 | 25/25 | 22/25 | 2e-9 |
+
+Residual at the derived radius is the 1e-9 association noise already documented,
+not a modelling error.
+
+### Thawing around what moved, rather than around the residue
+
+A chi rotation displaces 7-8 atoms, not the whole residue. Thawing around the
+displaced atoms instead of around every atom of the residue is 1.25-1.3x
+tighter, and is the set the delta should use:
+
+| protein | atoms | thaw, whole residue | thaw, displaced only | % of N |
+|---|---:|---:|---:|---:|
+| 1CRN | 648  | 245 | 218 | 33.6% |
+| 1UBQ | 1404 | 311 | 278 | 19.8% |
+| 2LZM | 2996 | 327 | 287 |  9.6% |
+| 1AKE | 7814 | 346 | 310 |  4.0% |
+
+The set is still essentially constant in N, which is the whole point: the delta
+is O(1) per move where the full evaluation is O(N^2 / TILE^2).
+
+### The 12 A cutoff buys almost nothing
+
+Both passes sweep every tile pair and reject with a box-box test before the
+inner loop, so the cutoff never removes the quadratic tile sweep. Removing the
+cutoff entirely, 150 evaluations each:
+
+| protein | ms/eval at 12 A | no cutoff | slowdown | dE |
+|---|---:|---:|---:|---:|
+| 1CRN | 0.280 | 0.279 | 0.99x | -8.9 |
+| 1UBQ | 0.387 | 0.390 | 1.01x | -9.8 |
+| 2LZM | 0.666 | 0.737 | 1.11x | +261 |
+| 1AKE | 1.557 | 1.916 | 1.23x | -321 |
+
+Tightening to 8 A saves 5% on 1AKE and costs 537 kcal/mol. The cutoff is close
+to free either way, and it is not a lever worth pulling. Note also that energies
+at different cutoffs are not converging to a limit, because the switching window
+moves with the cutoff, so each row is a slightly different model rather than a
+better approximation to the same one.
+
+The consequence for the delta is the useful part: since cost tracks the number
+of `i` rows swept and not the number of `j` neighbours visited, a delta over the
+310-atom affected set on 1AKE should cost about `|C| / N` of a full pass per
+accumulator. With an occupancy pass and the two energy accumulators that is
+roughly 3 x 4.0%, so of order 8-12x per move at 1AKE scale, and nothing at 1CRN
+where the affected set is a third of the protein and the GPU is latency-bound
+anyway.

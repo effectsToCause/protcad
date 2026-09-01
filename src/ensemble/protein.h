@@ -223,6 +223,27 @@ public:
 	int protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _radius,
 	                             bool _accumulate = false);
 	void protReleaseDielectricCU();
+	// Snapshot the device-order coordinates, so a caller can diff them against
+	// the post-move state and thaw around what actually moved.
+	// Smallest exemption radius for which the frozen dielectric is provably
+	// exact, derived from the occupancy kernel's own neighbour test.
+	double protDielectricInfluenceRadiusCU();
+	// Change the nonbonded cutoff at runtime, for measuring what it buys.
+	// The switching window is kept 2 A wide below the cutoff.
+	void protSetCutoffCU(double _cutoff);
+	double protGetCutoffCU();
+	void getDeviceCoordsCU(std::vector<double>& _x, std::vector<double>& _y,
+	                       std::vector<double>& _z);
+	// Thaw the exact set a move perturbs: every atom within _radius of an atom
+	// that actually changed position, taken over both the before and after
+	// geometry.  Thawing around the whole residue instead is correct but
+	// wasteful, since a chi rotation leaves the backbone and the proximal
+	// sidechain atoms where they were.
+	int protThawDielectricForMoveCU(const std::vector<double>& _oldX,
+	                                const std::vector<double>& _oldY,
+	                                const std::vector<double>& _oldZ,
+	                                double _radius = 0.0, int* _movedOut = 0,
+	                                double _tol = 1e-9);
 	void updateResidueEnergiesCU();
 	void updateResidueClashesCU();
 	UInt getNumHardBackboneClashesCU();

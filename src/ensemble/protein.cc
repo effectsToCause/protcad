@@ -2170,6 +2170,84 @@ int protein::protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _
 	return energyDielectricThawCount(itsEnergyContext);
 }
 
+void protein::protSetCutoffCU(double _cutoff)
+{
+	if (!itsEnergyContext) {return;}
+	energyParams p = energyGetParams(itsEnergyContext);
+	p.cutoff = _cutoff;
+	p.switchStart = _cutoff - 2.0;
+	energySetParams(itsEnergyContext, p);
+}
+
+double protein::protGetCutoffCU()
+{
+	if (!itsEnergyContext) {return 0.0;}
+	return (double)energyGetParams(itsEnergyContext).cutoff;
+}
+
+double protein::protDielectricInfluenceRadiusCU()
+{
+	return energyDielectricInfluenceRadius(itsEnergyContext);
+}
+
+void protein::getDeviceCoordsCU(vector<double>& _x, vector<double>& _y,
+                                vector<double>& _z)
+{
+	updateDeviceCoords();
+	_x = itsCoordX; _y = itsCoordY; _z = itsCoordZ;
+}
+
+int protein::protThawDielectricForMoveCU(const vector<double>& _oldX,
+                                         const vector<double>& _oldY,
+                                         const vector<double>& _oldZ,
+                                         double _radius, int* _movedOut,
+                                         double _tol)
+{
+	int N = updateDeviceCoords();
+	if (N == 0 || (int)_oldX.size() < N) {return -1;}
+	if (_radius <= 0.0)
+	{	_radius = energyDielectricInfluenceRadius(itsEnergyContext); }
+
+	vector<UInt> movedAtoms;
+	for (int a = 0; a < N; a++)
+	{
+		const double dx = itsCoordX[a] - _oldX[a];
+		const double dy = itsCoordY[a] - _oldY[a];
+		const double dz = itsCoordZ[a] - _oldZ[a];
+		if (dx * dx + dy * dy + dz * dz > _tol * _tol) {movedAtoms.push_back(a);}
+	}
+	if (_movedOut) {*_movedOut = (int)movedAtoms.size();}
+	if (movedAtoms.empty())
+	{	energySetDielectricThaw(itsEnergyContext, 0, 0, 0);
+		return 0; }
+
+	const double r2 = _radius * _radius;
+	vector<int> thaw;
+	for (int a = 0; a < N; a++)
+	{
+		bool hit = false;
+		for (UInt m = 0; m < movedAtoms.size() && !hit; m++)
+		{
+			const UInt b = movedAtoms[m];
+			// Both endpoints: the move perturbs an atom's shell whether it
+			// brings a neighbour in or takes one out.
+			double dx = itsCoordX[a] - itsCoordX[b];
+			double dy = itsCoordY[a] - itsCoordY[b];
+			double dz = itsCoordZ[a] - itsCoordZ[b];
+			if (dx * dx + dy * dy + dz * dz <= r2) {hit = true; break;}
+			dx = itsCoordX[a] - _oldX[b];
+			dy = itsCoordY[a] - _oldY[b];
+			dz = itsCoordZ[a] - _oldZ[b];
+			if (dx * dx + dy * dy + dz * dz <= r2) {hit = true;}
+		}
+		if (hit) {thaw.push_back(a);}
+	}
+	if (energySetDielectricThaw(itsEnergyContext, thaw.empty() ? 0 : &thaw[0],
+	                            (int)thaw.size(), 0))
+	{	return -1; }
+	return energyDielectricThawCount(itsEnergyContext);
+}
+
 void protein::protReleaseDielectricCU()
 {
 	if (itsEnergyContext) {energyReleaseDielectric(itsEnergyContext);}
