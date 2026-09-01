@@ -228,6 +228,10 @@ public:
 	// Smallest exemption radius for which the frozen dielectric is provably
 	// exact, derived from the occupancy kernel's own neighbour test.
 	double protDielectricInfluenceRadiusCU();
+	// Evaluate only what the last move changed.  Requires a frozen dielectric
+	// and a thaw set built by protThawDielectricForMoveCU.  Returns the changed
+	// part and the full torsion energy; see energyComputeDelta.
+	int protEnergyDeltaCU(double& _part, double& _torsion);
 	// Change the nonbonded cutoff at runtime, for measuring what it buys.
 	// The switching window is kept 2 A wide below the cutoff.
 	void protSetCutoffCU(double _cutoff);
@@ -418,6 +422,7 @@ private:
 	energyParams itsEnergyParams;
 	bool itsEnergyParamsSet = false;
 	std::vector<double> itsCoordX, itsCoordY, itsCoordZ;
+	std::vector<int> itsThawList;   // atoms the last move thawed, ascending
 	std::vector<int> itsRotGroupFirst, itsRotGroupCount;   // per residue, walk order
 	std::vector< std::vector<int> > itsResRotIndex;        // [chain][resInChain] -> walk index
 	double E;

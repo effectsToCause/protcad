@@ -492,6 +492,17 @@ int energySetDielectricThaw(energyContext* ctx, const int* atoms, int count,
 // to quote when sizing the exemption; a single call's own list is not it.
 double energyDielectricInfluenceRadius(energyContext* ctx);
 
+// Evaluate only the part of the energy a move can have changed: every pair with
+// at least one end in `atoms`, plus the per-atom solvation of those atoms.  The
+// dielectric must be frozen and `atoms` must be exactly the thaw set, since
+// those are the atoms whose occupancy is allowed to differ from the snapshot.
+// Track the total as E_new = E_old - P(old) + P(new) + torsion; that identity is
+// exact, not an approximation.  Pass atoms sorted by index for reproducibility.
+int energyComputeDelta(energyContext* ctx,
+                       const double* x, const double* y, const double* z,
+                       const int* atoms, int count,
+                       double* partOut, double* torsionOut);
+
 int energyDielectricThawCount(const energyContext* ctx);
 
 // Return to the fully coupled model.

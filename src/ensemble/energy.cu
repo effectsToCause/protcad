@@ -22,6 +22,7 @@
 // physics of the original implementation for regression purposes.
 
 #include "energy.h"
+#include <sys/time.h>
 
 // Internal working precision.  Kept out of energy.h so the public ABI is
 // independent of this flag.
@@ -93,6 +94,17 @@ struct energyContext
     // Static per-atom properties, original order.
     ereal *d_rad, *d_sqrtEps, *d_chg, *d_selfVol;
     ereal maxRadius;   // largest atomic radius, sets the exemption radius
+    // Delta evaluation scratch.  All sized once, so a move costs no allocation.
+    unsigned char* d_cmask;   // changed set, sorted order
+    int*   d_tileList;        // i-tiles holding at least one changed atom
+    int*   d_tileCount;
+    int*   d_inv;             // original index -> sorted slot
+    int*   d_atoms;           // changed set as original indices
+    ereal* d_eVdw2;
+    ereal* d_eEle2;
+    ereal* d_gather;          // 7 terms x count, compacted for the host sum
+    ereal* d_dpart;           // delta partials, four blocks of dSplitCap * nPad
+    int    dSplitCap;
     int   *d_resIndex;
     unsigned char *d_silent;
     int   *d_exclCount, *d_exclList, *d_exclSpan;
@@ -747,7 +759,8 @@ __global__ void kOccupancy(int nTiles,
                            const ereal* __restrict__ tileHi,
                            energyParams p, ereal v43, int occModel,
                            int nCand, int jSplit,
-                           ereal* __restrict__ occ)
+                           ereal* __restrict__ occ,
+                           const int* __restrict__ iTileList, int nList)
 {
     // Same j-split as kEnergy; see chooseSplit.  The occlusion sum has no
     // epilogue at all, so every chunk simply owns a stride of j.
@@ -762,8 +775,11 @@ __global__ void kOccupancy(int nTiles,
 
     const int warp = threadIdx.x / TILE;
     const int lane = threadIdx.x % TILE;
-    const int iTile = blockIdx.x * WARPS_PER_BLOCK + warp;
-    if (iTile >= nTiles) return;
+    int iTile = blockIdx.x * WARPS_PER_BLOCK + warp;
+    // A delta evaluation touches only the tiles holding thawed atoms.  The
+    // j loop is unchanged: a restricted atom still needs every neighbour.
+    if (iTileList) { if (iTile >= nList) return; iTile = iTileList[iTile]; }
+    else if (iTile >= nTiles) return;
 
     const int s = iTile * TILE + lane;
     const ereal xi = sx[s], yi = sy[s], zi = sz[s], ri = srad[s];
@@ -848,7 +864,10 @@ __global__ void kEnergy(int nTiles,
                         energyParams p, ereal v43, int nCand, int jSplit,
                         ereal* __restrict__ eVdw, ereal* __restrict__ eEle,
                         ereal* __restrict__ eSolvP, ereal* __restrict__ eSolvN,
-                        ereal* __restrict__ eSolvS)
+                        ereal* __restrict__ eSolvS,
+                        const int* __restrict__ iTileList, int nList,
+                        const unsigned char* __restrict__ cmask,
+                        ereal* __restrict__ eVdw2, ereal* __restrict__ eEle2)
 {
     // blockIdx.z partitions the j-tile loop. Each chunk accumulates the pair
     // terms for its own stride of j into a separate slice, and a following
@@ -862,19 +881,26 @@ __global__ void kEnergy(int nTiles,
         tileLo += k * (size_t)nTiles * 3; tileHi += k * (size_t)nTiles * 3;
         eVdw += ((size_t)chunk * nCand + k) * nPad;
         eEle += ((size_t)chunk * nCand + k) * nPad;
+        if (eVdw2) eVdw2 += ((size_t)chunk * nCand + k) * nPad;
+        if (eEle2) eEle2 += ((size_t)chunk * nCand + k) * nPad;
         eSolvP += k * nPad; eSolvN += k * nPad; eSolvS += k * nPad;
     }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK];
     __shared__ ereal shR[BLOCK], shE[BLOCK], shQ[BLOCK], shD[BLOCK];
     __shared__ int   shRes[BLOCK], shOrig[BLOCK];
+    __shared__ unsigned char shC[BLOCK];
 
     const int warp = threadIdx.x / TILE;
     const int lane = threadIdx.x % TILE;
-    const int iTile = blockIdx.x * WARPS_PER_BLOCK + warp;
-    if (iTile >= nTiles) return;
+    int iTile = blockIdx.x * WARPS_PER_BLOCK + warp;
+    if (iTileList) { if (iTile >= nList) return; iTile = iTileList[iTile]; }
+    else if (iTile >= nTiles) return;
 
     const int s = iTile * TILE + lane;
-    const bool active = !ssilent[s];
+    // cmask marks the atoms whose position or dielectric a move changed.  A
+    // tile is launched if any of its lanes is in that set, so the rest of the
+    // lanes fall out here rather than at tile granularity.
+    const bool active = !ssilent[s] && (!cmask || cmask[s]);
 
     const ereal xi = sx[s], yi = sy[s], zi = sz[s];
     const ereal ri = srad[s], ei = ssqrtEps[s], qi = schg[s];
@@ -892,6 +918,7 @@ __global__ void kEnergy(int nTiles,
     const ereal aHiX = tileHi[iTile * 3 + 0], aHiY = tileHi[iTile * 3 + 1], aHiZ = tileHi[iTile * 3 + 2];
 
     ereal accVdw = ereal(0), accEle = ereal(0);
+    ereal accVdw2 = ereal(0), accEle2 = ereal(0);
     const int base = warp * TILE;
 
     for (int jTile = chunk; jTile < nTiles; jTile += jSplit)
@@ -906,6 +933,7 @@ __global__ void kEnergy(int nTiles,
         shR[base + lane] = srad[js]; shE[base + lane] = ssqrtEps[js];
         shQ[base + lane] = schg[js]; shD[base + lane] = shellFromOcclusion(occ[js], srad[js], p, v43).eps;
         shRes[base + lane] = sresIndex[js]; shOrig[base + lane] = sorig[js];
+        shC[base + lane] = cmask ? cmask[js] : (unsigned char)0;
         if (ssilent[js]) shX[base + lane] = ereal(1e9);
         __syncwarp();
 
@@ -953,8 +981,14 @@ __global__ void kEnergy(int nTiles,
                 // Each pair is visited from both endpoints, so take half here.
                 // Exact in binary arithmetic, and it yields a per-atom energy
                 // decomposition for free.
-                accVdw += ereal(0.5) * sw * s14v * vdw;
-                accEle += ereal(0.5) * sw * s14e * ele;
+                const ereal hv = ereal(0.5) * sw * s14v * vdw;
+                const ereal he = ereal(0.5) * sw * s14e * ele;
+                accVdw += hv;
+                accEle += he;
+                // The half-pair split double counts a pair with both ends in
+                // the changed set, so accumulate those separately and let the
+                // host correct with 2*V1 - V2.
+                if (shC[base + k]) { accVdw2 += hv; accEle2 += he; }
             }
         }
         __syncwarp();
@@ -962,12 +996,16 @@ __global__ void kEnergy(int nTiles,
 
     if (!active) {
         eVdw[s] = eEle[s] = ereal(0);
+        if (eVdw2) eVdw2[s] = ereal(0);
+        if (eEle2) eEle2[s] = ereal(0);
         if (chunk == 0) eSolvP[s] = eSolvN[s] = eSolvS[s] = ereal(0);
         return;
     }
 
     eVdw[s] = p.vdwScale  * accVdw;
     eEle[s] = p.elecScale * accEle;
+    if (eVdw2) eVdw2[s] = p.vdwScale  * accVdw2;
+    if (eEle2) eEle2[s] = p.elecScale * accEle2;
 
     if (chunk != 0) return;
 
@@ -1262,6 +1300,10 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     // std::string.
     ctx->d_rad = ctx->d_sqrtEps = ctx->d_chg = ctx->d_selfVol = 0;
     ctx->maxRadius = ereal(0);
+    ctx->d_cmask = 0; ctx->d_tileList = 0; ctx->d_tileCount = 0;
+    ctx->d_inv = 0; ctx->d_atoms = 0;
+    ctx->d_eVdw2 = ctx->d_eEle2 = ctx->d_gather = 0;
+    ctx->d_dpart = 0; ctx->dSplitCap = 0;
     ctx->d_x = ctx->d_y = ctx->d_z = 0;
     ctx->d_sx = ctx->d_sy = ctx->d_sz = 0;
     ctx->d_srad = ctx->d_ssqrtEps = ctx->d_schg = ctx->d_sselfVol = 0;
@@ -1304,6 +1346,14 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
 
     bool ok = true;
+    ok &= devAlloc(&ctx->d_cmask, (size_t)ctx->nPad);
+    ok &= devAlloc(&ctx->d_tileList, (size_t)ctx->nTiles + 1);
+    ok &= devAlloc(&ctx->d_tileCount, 1);
+    ok &= devAlloc(&ctx->d_inv, (size_t)ctx->nPad);
+    ok &= devAlloc(&ctx->d_atoms, (size_t)ctx->nPad);
+    ok &= devAlloc(&ctx->d_eVdw2, (size_t)ctx->nPad);
+    ok &= devAlloc(&ctx->d_eEle2, (size_t)ctx->nPad);
+    ok &= devAlloc(&ctx->d_gather, (size_t)ctx->nPad * 7);
     ok &= devAlloc(&ctx->d_rad, N)      && devAlloc(&ctx->d_sqrtEps, N);
     ok &= devAlloc(&ctx->d_chg, N)      && devAlloc(&ctx->d_selfVol, N);
     ok &= devAlloc(&ctx->d_resIndex, N) && devAlloc(&ctx->d_silent, N);
@@ -1474,7 +1524,10 @@ void energyDestroy(energyContext* ctx)
         ctx->d_axisA, ctx->d_axisB, ctx->d_memberStart, ctx->d_members,
         ctx->d_angles,
         ctx->d_rx, ctx->d_ry, ctx->d_rz,
-        ctx->d_groupBegin, ctx->d_nGroups, ctx->d_accept
+        ctx->d_groupBegin, ctx->d_nGroups, ctx->d_accept,
+        ctx->d_cmask, ctx->d_tileList, ctx->d_tileCount, ctx->d_inv,
+        ctx->d_atoms, ctx->d_eVdw2, ctx->d_eEle2, ctx->d_gather,
+        ctx->d_dpart
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
         if (ptrs[i]) cudaFree(ptrs[i]);
@@ -1896,7 +1949,7 @@ int energyFreezeDielectric(energyContext* ctx,
                                 ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                 ctx->d_tileLo, ctx->d_tileHi,
                                 ctx->p, v43, ctx->p.occupancy, 1, jSplit,
-                                ctx->d_part);
+                                ctx->d_part, 0, 0);
     CUDA_OK(ctx, cudaPeekAtLastError());
     kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
                                                    ctx->d_part, ctx->d_occ);
@@ -1979,6 +2032,260 @@ int energyDielectricFrozen(const energyContext* ctx)
     return ctx ? ctx->freezeActive : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Delta evaluation
+//
+// A move changes only the pair terms with at least one end in the changed set
+// C, plus the per-atom solvation of atoms in C.  Everything else is bit for bit
+// what it was, so tracking
+//
+//     E_new = E_old - P(C, old) + P(C, new)
+//
+// is exact rather than approximate, provided C really does contain every atom
+// whose position or dielectric moved.  With the dielectric frozen, C is the
+// thaw set, whose size is independent of N.
+//
+// kEnergy splits each pair half and half between its endpoints, so summing the
+// per-atom partials over C undercounts the pairs that cross out of C.  V1 is
+// that half sum over all j, V2 the same restricted to j in C, and
+// P = 2*V1 - V2 recovers each changed pair exactly once.
+// ---------------------------------------------------------------------------
+
+__global__ void kBuildCmask(int nPad, const int* __restrict__ sorig,
+                            const unsigned char* __restrict__ thawOrig,
+                            unsigned char* __restrict__ cmask)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nPad) return;
+    const int o = sorig[s];
+    cmask[s] = (o >= 0 && thawOrig[o]) ? (unsigned char)1 : (unsigned char)0;
+}
+
+__global__ void kBuildInv(int nPad, const int* __restrict__ sorig,
+                          int* __restrict__ inv)
+{
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= nPad) return;
+    const int o = sorig[s];
+    if (o >= 0) inv[o] = s;
+}
+
+__global__ void kSelectTiles(int nTiles, const unsigned char* __restrict__ cmask,
+                             int* __restrict__ list, int* __restrict__ count)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    bool any = false;
+    for (int k = 0; k < TILE && !any; ++k) if (cmask[t * TILE + k]) any = true;
+    // Launch order does not affect the result: every tile writes only its own
+    // atoms, and the host sums in original atom order.
+    if (any) list[atomicAdd(count, 1)] = t;
+}
+
+__global__ void kGatherTerms(int count, const int* __restrict__ atoms,
+                             const int* __restrict__ inv, int nPad,
+                             const ereal* __restrict__ eVdw,
+                             const ereal* __restrict__ eEle,
+                             const ereal* __restrict__ eVdw2,
+                             const ereal* __restrict__ eEle2,
+                             const ereal* __restrict__ eSolvP,
+                             const ereal* __restrict__ eSolvN,
+                             const ereal* __restrict__ eSolvS,
+                             ereal* __restrict__ out)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    const int s = inv[atoms[k]];
+    out[0 * count + k] = eVdw[s];
+    out[1 * count + k] = eEle[s];
+    out[2 * count + k] = eVdw2[s];
+    out[3 * count + k] = eEle2[s];
+    out[4 * count + k] = eSolvP[s];
+    out[5 * count + k] = eSolvN[s];
+    out[6 * count + k] = eSolvS[s];
+}
+
+// Stage timing, enabled with PROTCAD_DELTA_TIMING=1.  The delta is meant to be
+// dominated by fixed overhead rather than arithmetic, so it is worth being able
+// to see which stage that overhead is in.
+struct deltaTiming {
+    double upload, order, masks, count, occ, energy, gather, torsion;
+    long   calls;
+    deltaTiming() : upload(0), order(0), masks(0), count(0), occ(0),
+                    energy(0), gather(0), torsion(0), calls(0) {}
+    ~deltaTiming() {
+        if (!calls || !getenv("PROTCAD_DELTA_TIMING")) return;
+        fprintf(stderr,
+            "delta timing over %ld calls, us/call:\n"
+            "  uploadCoords %7.1f\n  buildOrder   %7.1f\n  masks+tiles  %7.1f\n"
+            "  tileCount    %7.1f\n  occupancy    %7.1f\n  energy       %7.1f\n"
+            "  gather+D2H   %7.1f\n  torsion      %7.1f\n",
+            calls, 1e3 * upload / calls, 1e3 * order / calls, 1e3 * masks / calls,
+            1e3 * count / calls, 1e3 * occ / calls, 1e3 * energy / calls,
+            1e3 * gather / calls, 1e3 * torsion / calls);
+    }
+};
+static deltaTiming g_dt;
+static bool deltaTimingOn()
+{
+    static int on = -1;
+    if (on < 0) on = getenv("PROTCAD_DELTA_TIMING") ? 1 : 0;
+    return on != 0;
+}
+static double dtNow()
+{
+    cudaDeviceSynchronize();
+    struct timeval tv; gettimeofday(&tv, 0);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+#define DT_MARK(field) do { if (timing) { const double _n = dtNow(); \
+    g_dt.field += _n - _t; _t = _n; } } while (0)
+
+int energyComputeDelta(energyContext* ctx,
+                       const double* x, const double* y, const double* z,
+                       const int* atoms, int count,
+                       double* partOut, double* torsionOut)
+{
+    const bool timing = deltaTimingOn();
+    double _t = timing ? dtNow() : 0.0;
+    if (timing) g_dt.calls++;
+    if (!ctx || count <= 0 || count > ctx->N) return -1;
+    if (!ctx->freezeActive) {
+        setError(ctx, "energyComputeDelta",
+                 "delta evaluation requires a frozen dielectric",
+                 __FILE__, __LINE__);
+        return -1;
+    }
+    const int nPad = ctx->nPad, nT = ctx->nTiles;
+
+    if (x && uploadCoords(ctx, x, y, z) != 0) return -1;
+    DT_MARK(upload);
+    if (buildOrder(ctx) != 0) return -1;
+    DT_MARK(order);
+
+    ereal v43 = (ctx->p.occupancy == OCCUPANCY_LEGACY_FULLVOLUME)
+              ? ereal(4.188) : ereal(4.1887902048);
+
+    const int tb = 256;
+    kBuildCmask<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_thaw,
+                                              ctx->d_cmask);
+    kBuildInv<<<(nPad + tb - 1) / tb, tb>>>(nPad, ctx->d_sorig, ctx->d_inv);
+    CUDA_OK(ctx, cudaMemset(ctx->d_tileCount, 0, sizeof(int)));
+    kSelectTiles<<<(nT + tb - 1) / tb, tb>>>(nT, ctx->d_cmask,
+                                             ctx->d_tileList, ctx->d_tileCount);
+    CUDA_OK(ctx, cudaPeekAtLastError());
+    DT_MARK(masks);
+
+    int nList = 0;
+    CUDA_OK(ctx, cudaMemcpy(&nList, ctx->d_tileCount, sizeof(int),
+                            cudaMemcpyDeviceToHost));
+    DT_MARK(count);
+    if (nList == 0) { if (partOut) *partOut = 0.0; }
+
+    CUDA_OK(ctx, cudaMemcpy(ctx->d_atoms, atoms, count * sizeof(int),
+                            cudaMemcpyHostToDevice));
+
+    // Restricting the i rows removes work, but it also removes parallelism:
+    // 300 atoms is about ten tiles, so ten warps, on a card that wants
+    // hundreds.  Split the j loop hard enough to fill it again.  This is the
+    // difference between the delta being slower than a full pass and faster.
+    const int DSPLIT_MAX = 64;
+    int dSplit = nList > 0 ? (targetWarps() + nList - 1) / nList : 1;
+    if (dSplit > nT) dSplit = nT;
+    if (dSplit > DSPLIT_MAX) dSplit = DSPLIT_MAX;
+    if (dSplit < 1) dSplit = 1;
+
+    if (!ctx->d_dpart || ctx->dSplitCap < dSplit) {
+        if (ctx->d_dpart) cudaFree(ctx->d_dpart);
+        ctx->d_dpart = 0; ctx->dSplitCap = 0;
+        if (!devAlloc(&ctx->d_dpart, (size_t)4 * DSPLIT_MAX * ctx->nPad)) {
+            setError(ctx, "energyComputeDelta", "out of memory for delta partials",
+                     __FILE__, __LINE__);
+            return -1;
+        }
+        ctx->dSplitCap = DSPLIT_MAX;
+    }
+    const size_t blk = (size_t)dSplit * nPad;
+    const int blocks = (nList + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+
+    if (nList > 0)
+    {
+        // Occupancy for the thawed atoms only.  The frozen field supplies
+        // every other atom, so the untouched slots of d_occ are overwritten by
+        // applyFreeze and their stale partials are never read.
+        kOccupancy<<<dim3(blocks, 1, dSplit), BLOCK>>>(
+            nT, ctx->d_sx, ctx->d_sy, ctx->d_sz, ctx->d_srad, ctx->d_sselfVol,
+            ctx->d_ssilent, ctx->d_tileLo, ctx->d_tileHi, ctx->p, v43,
+            ctx->p.occupancy, 1, dSplit, ctx->d_dpart, ctx->d_tileList, nList);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, dSplit,
+                                                       ctx->d_dpart, ctx->d_occ);
+        applyFreeze(ctx, 1, ctx->d_occ);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        DT_MARK(occ);
+
+        kEnergy<<<dim3(blocks, 1, dSplit), BLOCK>>>(
+            nT, ctx->d_sx, ctx->d_sy, ctx->d_sz, ctx->d_srad, ctx->d_ssqrtEps,
+            ctx->d_schg, ctx->d_sresIndex, ctx->d_sorig, ctx->d_ssilent,
+            ctx->d_occ, ctx->d_tileLo, ctx->d_tileHi,
+            ctx->d_exclCount, ctx->d_exclList, ctx->exclStride, ctx->d_exclSpan,
+            ctx->p, v43, 1, dSplit,
+            ctx->d_dpart, ctx->d_dpart + blk,
+            ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS,
+            ctx->d_tileList, nList, ctx->d_cmask,
+            ctx->d_dpart + 2 * blk, ctx->d_dpart + 3 * blk);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        {
+            const int rb = (int)((nPad + 255) / 256);
+            kReduceParts<<<rb, 256>>>(1, nPad, dSplit, ctx->d_dpart,
+                                      ctx->d_eVdw, ctx->d_eEle);
+            kReduceParts<<<rb, 256>>>(1, nPad, dSplit, ctx->d_dpart + 2 * blk,
+                                      ctx->d_eVdw2, ctx->d_eEle2);
+        }
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        DT_MARK(energy);
+
+        kGatherTerms<<<(count + tb - 1) / tb, tb>>>(
+            count, ctx->d_atoms, ctx->d_inv, nPad,
+            ctx->d_eVdw, ctx->d_eEle, ctx->d_eVdw2, ctx->d_eEle2,
+            ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS, ctx->d_gather);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+
+        std::vector<ereal> g((size_t)count * 7);
+        CUDA_OK(ctx, cudaMemcpy(&g[0], ctx->d_gather,
+                                (size_t)count * 7 * sizeof(ereal),
+                                cudaMemcpyDeviceToHost));
+
+        // Kahan, in the caller's atom order, so the result does not depend on
+        // the spatial sort.
+        double term[7];
+        for (int t = 0; t < 7; ++t) {
+            double sum = 0.0, c = 0.0;
+            const ereal* src = &g[(size_t)t * count];
+            for (int k = 0; k < count; ++k) {
+                double yv = double(src[k]) - c;
+                double tt = sum + yv;
+                c = (tt - sum) - yv;
+                sum = tt;
+            }
+            term[t] = sum;
+        }
+        const double pVdw = 2.0 * term[0] - term[2];
+        const double pEle = 2.0 * term[1] - term[3];
+        if (partOut) *partOut = pVdw + pEle + term[4] + term[5] + term[6];
+        DT_MARK(gather);
+    }
+
+    if (torsionOut) {
+        double eTor = 0.0;
+        if (torsionTotals(ctx, ctx->d_x, ctx->d_y, ctx->d_z, 1, &eTor, 0) != 0)
+            return -1;
+        *torsionOut = eTor;
+        DT_MARK(torsion);
+    }
+    return 0;
+}
+
 static int energyComputeImpl(energyContext* ctx,
                              const double* x, const double* y, const double* z,
                              double* totalOut, energyBreakdown* breakdown,
@@ -2013,7 +2320,7 @@ static int energyComputeImpl(energyContext* ctx,
                                   ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                   ctx->d_tileLo, ctx->d_tileHi,
                                   ctx->p, v43, ctx->p.occupancy, 1, jSplit,
-                                  ctx->d_part);
+                                  ctx->d_part, 0, 0);
         CUDA_OK(ctx, cudaPeekAtLastError());
         kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
                                                        ctx->d_part, ctx->d_occ);
@@ -2039,7 +2346,7 @@ static int energyComputeImpl(energyContext* ctx,
                                ctx->d_part,
                                ctx->d_part + (size_t)jSplit * nPad,
                                ctx->d_eSolvP,
-                               ctx->d_eSolvN, ctx->d_eSolvS);
+                               ctx->d_eSolvN, ctx->d_eSolvS, 0, 0, 0, 0, 0);
     CUDA_OK(ctx, cudaPeekAtLastError());
     {
         int rb = (int)((nPad + 255) / 256);
@@ -2441,7 +2748,7 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                                  ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                  ctx->d_btileLo, ctx->d_btileHi,
                                  ctx->p, v43, ctx->p.occupancy, nCand, jSplit,
-                                 ctx->d_part);
+                                 ctx->d_part, 0, 0);
         CUDA_OK(ctx, cudaPeekAtLastError());
         const size_t tot = (size_t)nCand * nPad;
         kReduceOcc<<<(int)((tot + 255) / 256), 256>>>(nCand, nPad, jSplit,
@@ -2470,7 +2777,8 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                               ctx->d_exclSpan, ctx->p, v43, nCand, jSplit,
                               ctx->d_part,
                               ctx->d_part + (size_t)jSplit * stride,
-                              t0 + 2 * stride, t0 + 3 * stride, t0 + 4 * stride);
+                              t0 + 2 * stride, t0 + 3 * stride, t0 + 4 * stride,
+                              0, 0, 0, 0, 0);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     {
@@ -2887,7 +3195,7 @@ int shellCompute(energyContext* ctx,
                                   ctx->d_srad, ctx->d_sselfVol, ctx->d_ssilent,
                                   ctx->d_tileLo, ctx->d_tileHi,
                                   ctx->p, v43, ctx->p.occupancy, 1, jSplit,
-                                  ctx->d_part);
+                                  ctx->d_part, 0, 0);
         CUDA_OK(ctx, cudaPeekAtLastError());
         kReduceOcc<<<(int)((nPad + 255) / 256), 256>>>(1, nPad, jSplit,
                                                        ctx->d_part, ctx->d_occ);

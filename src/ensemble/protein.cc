@@ -2185,6 +2185,18 @@ double protein::protGetCutoffCU()
 	return (double)energyGetParams(itsEnergyContext).cutoff;
 }
 
+int protein::protEnergyDeltaCU(double& _part, double& _torsion)
+{
+	int N = updateDeviceCoords();
+	if (N == 0) {return -1;}
+	// The delta must cover exactly the atoms whose occupancy is allowed to
+	// differ from the snapshot, which is the thaw set the move installed.
+	if (itsThawList.empty()) {return -1;}
+	return energyComputeDelta(itsEnergyContext, &itsCoordX[0], &itsCoordY[0],
+	                          &itsCoordZ[0], &itsThawList[0],
+	                          (int)itsThawList.size(), &_part, &_torsion);
+}
+
 double protein::protDielectricInfluenceRadiusCU()
 {
 	return energyDielectricInfluenceRadius(itsEnergyContext);
@@ -2219,6 +2231,7 @@ int protein::protThawDielectricForMoveCU(const vector<double>& _oldX,
 	if (_movedOut) {*_movedOut = (int)movedAtoms.size();}
 	if (movedAtoms.empty())
 	{	energySetDielectricThaw(itsEnergyContext, 0, 0, 0);
+		itsThawList.clear();
 		return 0; }
 
 	const double r2 = _radius * _radius;
@@ -2245,6 +2258,7 @@ int protein::protThawDielectricForMoveCU(const vector<double>& _oldX,
 	if (energySetDielectricThaw(itsEnergyContext, thaw.empty() ? 0 : &thaw[0],
 	                            (int)thaw.size(), 0))
 	{	return -1; }
+	itsThawList = thaw;
 	return energyDielectricThawCount(itsEnergyContext);
 }
 
