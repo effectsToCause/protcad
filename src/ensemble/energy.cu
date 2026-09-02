@@ -193,6 +193,8 @@ struct energyContext
     ereal *d_bterms2;
     ereal *d_bstage, *d_bgather, *d_btgat;
     size_t bdStageCap, bdGatherCap, btgatCap;
+    int    *d_moved;          // atoms that differ between candidates
+    size_t  movedCap;
     ereal  *d_torBase;        // primed per-torsion energies, device copy
     double *d_torPart;        // one torsion total per candidate
     size_t torBaseCap, torPartCap;
@@ -1381,6 +1383,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
     ctx->d_bdpart = ctx->d_bterms2 = ctx->d_bstage = ctx->d_bgather = 0;
+    ctx->d_moved = 0; ctx->movedCap = 0;
     ctx->d_torBase = 0; ctx->d_torPart = 0;
     ctx->torBaseCap = ctx->torPartCap = 0;
     ctx->d_bpart = 0; ctx->bdPartCap = 0;
@@ -1577,6 +1580,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_dpart, ctx->d_stage, ctx->d_torSub,
         ctx->d_bdpart, ctx->d_bterms2, ctx->d_bstage, ctx->d_bgather, ctx->d_bpart,
         ctx->d_torBase, ctx->d_torPart,
+        ctx->d_moved,
         ctx->d_btgat
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
@@ -3514,7 +3518,8 @@ static double bpNow()
 int energyComputeBatchDelta(energyContext* ctx, int nCand,
                             const double* x, const double* y, const double* z,
                             const int* atoms, int count,
-                            double* partOut, double* torsionOut)
+                            double* partOut, double* torsionOut,
+                            const int* moved, int nMoved)
 {
     if (!ctx || nCand <= 0 || count <= 0 || count > ctx->N || !atoms) return -1;
     if (!ctx->freezeActive) {
@@ -3556,8 +3561,32 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
     double _bt = bprof ? bpNow() : 0.0;
     if (bprof) ++g_bp.calls;
 
+    // kSeedBatch has already given every candidate the resident conformation,
+    // so only atoms that actually differ from it need staging.  The changed set
+    // is the union of what the move displaced and everything whose dielectric
+    // environment it disturbed, and the second part is by construction
+    // unchanged -- shipping it was sending the GPU values it already had.
+    const int*  sAtoms = (moved && nMoved > 0) ? moved  : atoms;
+    const int   sCount = (moved && nMoved > 0) ? nMoved : count;
+    const int*  dStage = ctx->d_atoms;
+    if (moved && nMoved > 0) {
+        if (!ctx->d_moved || ctx->movedCap < (size_t)nMoved) {
+            if (ctx->d_moved) cudaFree(ctx->d_moved);
+            ctx->d_moved = 0; ctx->movedCap = 0;
+            if (!devAlloc(&ctx->d_moved, (size_t)nMoved)) {
+                setError(ctx, "energyComputeBatchDelta", "out of memory for moved set",
+                         __FILE__, __LINE__);
+                return -1;
+            }
+            ctx->movedCap = (size_t)nMoved;
+        }
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_moved, moved, (size_t)nMoved * sizeof(int),
+                                cudaMemcpyHostToDevice));
+        dStage = ctx->d_moved;
+    }
+
     if (x) {
-        const size_t need = (size_t)3 * count * nCand;
+        const size_t need = (size_t)3 * sCount * nCand;
         if (!ctx->d_bstage || ctx->bdStageCap < need) {
             if (ctx->d_bstage) cudaFree(ctx->d_bstage);
             ctx->d_bstage = 0; ctx->bdStageCap = 0;
@@ -3573,20 +3602,20 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
             const double* cx = x + (size_t)k * N;
             const double* cy = y + (size_t)k * N;
             const double* cz = z + (size_t)k * N;
-            ereal* s = &ctx->h_bstage[(size_t)k * 3 * count];
-            for (int i = 0; i < count; ++i) {
-                const int a = atoms[i];
-                s[i]             = ereal(cx[a]);
-                s[count + i]     = ereal(cy[a]);
-                s[2 * count + i] = ereal(cz[a]);
+            ereal* s = &ctx->h_bstage[(size_t)k * 3 * sCount];
+            for (int i = 0; i < sCount; ++i) {
+                const int a = sAtoms[i];
+                s[i]              = ereal(cx[a]);
+                s[sCount + i]     = ereal(cy[a]);
+                s[2 * sCount + i] = ereal(cz[a]);
             }
         }
         BP_MARK(stageFill);
         CUDA_OK(ctx, cudaMemcpy(ctx->d_bstage, &ctx->h_bstage[0],
                                 need * sizeof(ereal), cudaMemcpyHostToDevice));
-        dim3 g((count + tb - 1) / tb, nCand);
-        kScatterCoordsBatch<<<g, tb>>>(count, nCand, N, nPad,
-                                       ctx->d_atoms, ctx->d_bstage, ctx->d_inv,
+        dim3 g((sCount + tb - 1) / tb, nCand);
+        kScatterCoordsBatch<<<g, tb>>>(sCount, nCand, N, nPad,
+                                       dStage, ctx->d_bstage, ctx->d_inv,
                                        ctx->d_bx, ctx->d_by, ctx->d_bz,
                                        ctx->d_bsx, ctx->d_bsy, ctx->d_bsz);
         CUDA_OK(ctx, cudaPeekAtLastError());

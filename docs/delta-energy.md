@@ -388,3 +388,42 @@ any more, and the batch delta's remaining cost is now mostly `kEnergy` plus H2D
 staging latency that does not scale with structure size -- which is where the
 question of keeping coordinates device-resident finally becomes the right one
 to ask.
+
+## Staging the moved set instead of the changed set
+
+`kSeedBatch` gives every candidate row the resident device conformation before
+anything is scattered into it.  The staging step then overwrote the *entire*
+changed set from host memory -- but the changed set is the union of the atoms
+the move displaced and every atom whose dielectric environment it disturbed,
+and the second group is by construction unchanged.  Those values were already
+sitting on the device.  We were shipping them back.
+
+On 1crn the changed set averages 44.9% of 648 atoms, about 291, while the moved
+residue is 10-20 atoms: roughly a fourteenth of the volume was doing all the
+work.  `energyComputeBatchDelta` now takes an optional `moved`/`nMoved` pair and
+stages and scatters only that subset; passing 0 keeps the old behaviour for any
+caller whose moves lack a known support.
+
+The host-side thaw fill-in in `bestSidechainCandidateDeltaCU` went away with it.
+It existed only to stop the batch shipping uninitialised coordinates for thawed
+atoms outside the moved residue; since those now come from the seed, the loop
+was writing O(K * |thaw|) doubles per trial that nothing read.
+
+Measured, same seed and trial count, `energyComputeBatchDelta` per trial:
+
+| structure | before | after |
+|---|---|---|
+| 1crn  |  763 us | 580 us |
+| 1ubq  | 1100 us | 837 us |
+| 1ake  | 2243 us | 1884 us |
+
+The staging sub-phase itself went 181 -> 16 us on 1crn and 353 -> 18 us on 1ake,
+and is now flat in structure size -- which is the signature of a transfer that
+has stopped being about volume and is purely launch latency.  The separate thaw
+fill-in phase went from 57 us (1ubq) and 89 us (1ake) to zero.  1ake over 512
+trials, best of three: 2.50 -> 2.24 s wall.
+
+Worst relative error in `batchDeltaTest` is unchanged at 3.21e-07 and descent
+trajectories are identical to the host-reduction reference, as they must be:
+the atoms that stopped being staged were being written with the values they
+already held.

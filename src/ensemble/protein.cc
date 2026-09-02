@@ -2040,21 +2040,13 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	// Fill in the thawed atoms outside the moved residue.  They are unchanged
 	// by definition, but the batch reads coordinates for every atom of the
 	// changed set and will not infer that.
+	// The thawed atoms outside the moved residue used to be copied into every
+	// candidate slice here, because the batch staged the whole changed set and
+	// would otherwise have shipped uninitialised values.  It now stages only
+	// the moved residue and takes the rest from the resident conformation it
+	// already seeds each candidate from, so writing them was supplying the
+	// device with coordinates it had, at O(K * |thaw|) per trial.
 	const double _p3 = g_deltaProfOn ? profNow() : 0.0;
-	{
-		vector<unsigned char> isRes((size_t)N, 0);
-		for (size_t m = 0; m < resAtoms.size(); m++) {isRes[resAtoms[m]] = 1;}
-		for (size_t t = 0; t < itsThawList.size(); t++)
-		{
-			const int a = itsThawList[t];
-			if (isRes[a]) {continue;}
-			for (UInt k = 0; k <= _numCandidates; k++)
-			{
-				const size_t o = (size_t)k * N + a;
-				bx[o] = oldX[a]; by[o] = oldY[a]; bz[o] = oldZ[a];
-			}
-		}
-	}
 
 	if (g_deltaProfOn) {g_deltaProf.t[3] += profNow() - _p3;}
 	// The pre-move part used to be its own energyComputeDelta call.  It was
@@ -2074,7 +2066,8 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	vector<double> parts(nEval, 0.0), tors(nEval, 0.0);
 	if (energyComputeBatchDelta(itsEnergyContext, nEval,
 	                            &bx[0], &by[0], &bz[0], &itsThawList[0],
-	                            (int)itsThawList.size(), &parts[0], &tors[0]))
+	                            (int)itsThawList.size(), &parts[0], &tors[0],
+	                            &resAtoms[0], (int)resAtoms.size()))
 	{
 		cout << "protein::bestSidechainCandidateDeltaCU failed: "
 		     << energyLastError(itsEnergyContext) << endl;

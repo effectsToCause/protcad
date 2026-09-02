@@ -520,10 +520,19 @@ int energyDielectricThawCount(const energyContext* ctx);
 // receive nCand values, and candidate k's total is
 // E_old - P(old) + partOut[k] + torsionOut[k], the same identity the
 // single-candidate delta uses.
+// `moved`, when given, is the subset of `atoms` that actually differs between
+// candidates -- in practice the one residue a sidechain move touches.  The rest
+// of the thaw set is identical in every candidate and identical to the resident
+// conformation the batch is already seeded from, so staging it is redundant.
+// Passing it shrinks the host-to-device transfer from the changed set to the
+// moved set, which on 1crn is roughly a fourteenth of the volume.  Pass 0 to
+// stage the whole changed set, which is what the caller must do if a move can
+// displace atoms outside a known support.
 int energyComputeBatchDelta(energyContext* ctx, int nCand,
                             const double* x, const double* y, const double* z,
                             const int* atoms, int count,
-                            double* partOut, double* torsionOut);
+                            double* partOut, double* torsionOut,
+                            const int* moved = 0, int nMoved = 0);
 
 // Return to the fully coupled model.
 int energyReleaseDielectric(energyContext* ctx);
