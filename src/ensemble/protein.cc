@@ -2,6 +2,7 @@
 // contents: class protein implementation
 
 #include "protein.h"
+#include <cstring>
 #include "amberParams.h"
 #include <set>
 bool protein::messagesActive = false;
@@ -1733,14 +1734,31 @@ double protein::bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt 
 	vector < vector < vector <double> > > confs(_numCandidates);
 	vector <double> bx((size_t)_numCandidates * N), by((size_t)_numCandidates * N), bz((size_t)_numCandidates * N);
 
+	// A sidechain move can only displace its own residue, so seed every slice
+	// from the entry geometry once and refresh just that residue per candidate.
+	// Rebuilding all N coordinates from the atom pointers once per candidate is
+	// host bookkeeping that grows with the whole structure while the move does
+	// not, and on larger proteins it outweighs the evaluation it feeds.
+	vector<int> resAtoms;
+	residueAtomIndicesCU(_chainIndex, _resIndex, resAtoms);
+	if (resAtoms.empty()) {return 1E30;}
+	for (UInt k = 0; k < _numCandidates; k++)
+	{
+		const size_t off = (size_t)k * N;
+		memcpy(&bx[off], &itsCoordX[0], (size_t)N * sizeof(double));
+		memcpy(&by[off], &itsCoordY[0], (size_t)N * sizeof(double));
+		memcpy(&bz[off], &itsCoordZ[0], (size_t)N * sizeof(double));
+	}
+
 	for (UInt k = 0; k < _numCandidates; k++)
 	{
 		confs[k] = randContinuousSidechainConformation(_chainIndex, _resIndex);
 		setSidechainDihedralAngles(_chainIndex, _resIndex, confs[k]);
-		updateDeviceCoords();
+		refreshDeviceCoords(resAtoms);
 		size_t off = (size_t)k * N;
-		for (int i = 0; i < N; i++)
+		for (size_t m = 0; m < resAtoms.size(); m++)
 		{
+			const int i = resAtoms[m];
 			bx[off + i] = itsCoordX[i]; by[off + i] = itsCoordY[i]; bz[off + i] = itsCoordZ[i];
 		}
 	}
@@ -1748,7 +1766,7 @@ double protein::bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt 
 	// Restore, then seed the spatial order from the entry conformation so every
 	// candidate is culled and ranked against the same order.
 	setSidechainDihedralAngles(_chainIndex, _resIndex, entryConf);
-	updateDeviceCoords();
+	refreshDeviceCoords(resAtoms);
 	energySetCoords(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0]);
 
 	vector <double> energies(_numCandidates, 1E30);
@@ -1762,6 +1780,241 @@ double protein::bestSidechainCandidateCU(UInt _chainIndex, UInt _resIndex, UInt 
 	for (UInt k = 1; k < _numCandidates; k++) {if (energies[k] < energies[best]) {best = k;}}
 	_bestConf = confs[best];
 	return energies[best];
+}
+
+bool protein::protRefreezeDielectricCU()
+{
+	if (!itsEnergyContext) {return false;}
+	if (energyRefreezeDielectric(itsEnergyContext))
+	{
+		cout << "protein::protRefreezeDielectricCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return false;
+	}
+	itsThawList.clear();
+	return true;
+}
+
+void protein::residueAtomIndicesCU(UInt _chainIndex, UInt _resIndex,
+                                   std::vector<int>& _out)
+{
+	_out.clear();
+	const int N = (int)itsCoordX.size();
+	int i = 0;
+	for (atomIterator aIter(this); !(aIter.last()) && i < N; aIter++, i++)
+	{
+		if (aIter.getChainIndex() == (int)_chainIndex &&
+		    aIter.getResidueIndex() == (int)_resIndex) {_out.push_back(i);}
+	}
+}
+
+int protein::protDielectricThawCountCU()
+{
+	if (!itsEnergyContext) {return -1;}
+	return energyDielectricThawCount(itsEnergyContext);
+}
+
+int protein::protThawDielectricForBatchCU(const vector<double>& _oldX,
+                                          const vector<double>& _oldY,
+                                          const vector<double>& _oldZ,
+                                          const vector<double>& _candX,
+                                          const vector<double>& _candY,
+                                          const vector<double>& _candZ,
+                                          int _nCand, double _radius,
+                                          int* _movedOut, double _tol,
+                                          const vector<int>* _support)
+{
+	int N = updateDeviceCoords();
+	if (N == 0 || (int)_oldX.size() < N || _nCand <= 0) {return -1;}
+	if ((int)_candX.size() < (size_t)_nCand * N) {return -1;}
+	if (_radius <= 0.0)
+	{	_radius = energyDielectricInfluenceRadius(itsEnergyContext); }
+
+	// An atom is moved if any candidate moves it.  The set is shared by the
+	// whole batch, which is what lets one changed set and one tile list serve
+	// every candidate.
+	// _support, when given, is the set of atoms the caller could have moved;
+	// the candidate arrays are only meaningful there.  Scanning all N instead
+	// would force the caller to materialise every candidate in full, which for
+	// a batch is megabytes of copying to discover that nothing outside one
+	// residue changed.
+	vector<int> movedAtoms;
+	const int nScan = _support ? (int)_support->size() : N;
+	for (int s = 0; s < nScan; s++)
+	{
+		const int a = _support ? (*_support)[s] : s;
+		bool moved = false;
+		for (int k = 0; k < _nCand && !moved; k++)
+		{
+			const size_t o = (size_t)k * N + a;
+			const double dx = _candX[o] - _oldX[a];
+			const double dy = _candY[o] - _oldY[a];
+			const double dz = _candZ[o] - _oldZ[a];
+			if (dx * dx + dy * dy + dz * dz > _tol * _tol) {moved = true;}
+		}
+		if (moved) {movedAtoms.push_back(a);}
+	}
+	sort(movedAtoms.begin(), movedAtoms.end());
+	if (_movedOut) {*_movedOut = (int)movedAtoms.size();}
+	if (movedAtoms.empty())
+	{	energySetDielectricThaw(itsEnergyContext, 0, 0, 0);
+		itsThawList.clear();
+		return 0; }
+
+	// One bounding sphere per moved atom, over its position before the move and
+	// in every candidate.  Thawing everything within (sphere + radius) of any
+	// of them is a superset of the exact per-candidate union, so it is exact in
+	// the sense that matters, and it costs O(N |A|) rather than O(N |A| K).
+	const int nMoved = (int)movedAtoms.size();
+	vector<double> cx(nMoved), cy(nMoved), cz(nMoved), cr(nMoved);
+	for (int m = 0; m < nMoved; m++)
+	{
+		const int b = movedAtoms[m];
+		double sx = _oldX[b], sy = _oldY[b], sz = _oldZ[b];
+		double mnx = sx, mxx = sx, mny = sy, mxy = sy, mnz = sz, mxz = sz;
+		for (int k = 0; k < _nCand; k++)
+		{
+			const size_t o = (size_t)k * N + b;
+			if (_candX[o] < mnx) {mnx = _candX[o];} if (_candX[o] > mxx) {mxx = _candX[o];}
+			if (_candY[o] < mny) {mny = _candY[o];} if (_candY[o] > mxy) {mxy = _candY[o];}
+			if (_candZ[o] < mnz) {mnz = _candZ[o];} if (_candZ[o] > mxz) {mxz = _candZ[o];}
+		}
+		cx[m] = 0.5 * (mnx + mxx); cy[m] = 0.5 * (mny + mxy); cz[m] = 0.5 * (mnz + mxz);
+		double r2 = 0.0;
+		{	const double hx = 0.5 * (mxx - mnx), hy = 0.5 * (mxy - mny), hz = 0.5 * (mxz - mnz);
+			r2 = hx * hx + hy * hy + hz * hz; }
+		cr[m] = sqrt(r2) + _radius;
+	}
+
+	vector<int> thaw;
+	for (int a = 0; a < N; a++)
+	{
+		bool hit = false;
+		for (int m = 0; m < nMoved && !hit; m++)
+		{
+			const double dx = itsCoordX[a] - cx[m];
+			const double dy = itsCoordY[a] - cy[m];
+			const double dz = itsCoordZ[a] - cz[m];
+			if (dx * dx + dy * dy + dz * dz <= cr[m] * cr[m]) {hit = true;}
+		}
+		if (hit) {thaw.push_back(a);}
+	}
+	if (energySetDielectricThaw(itsEnergyContext, thaw.empty() ? 0 : &thaw[0],
+	                            (int)thaw.size(), 0))
+	{	return -1; }
+	itsThawList = thaw;
+	return energyDielectricThawCount(itsEnergyContext);
+}
+
+double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
+                                              UInt _numCandidates,
+                                              vector < vector <double> > &_bestConf,
+                                              double _nbCurrent, double& _nbBest,
+                                              double& _torBest,
+                                              vector<double>* _allEnergies,
+                                              vector < vector < vector <double> > >* _allConfs)
+{
+	int N = updateDeviceCoords();
+	if (N == 0 || _numCandidates == 0 || !itsEnergyContext) {return 1E30;}
+
+	vector < vector <double> > entryConf = getSidechainDihedrals(_chainIndex, _resIndex);
+	if (entryConf.empty()) {return 1E30;}
+
+	const vector<double> oldX = itsCoordX, oldY = itsCoordY, oldZ = itsCoordZ;
+
+	// Only the moved residue's atoms can differ between candidates, so seed
+	// every slice from the entry geometry once and then overwrite that residue.
+	// Refreshing all N coordinates from the atom pointers 32 times over is pure
+	// host bookkeeping, and on a structure of any size it costs more than the
+	// device work the delta is trying to save.
+	vector<int> resAtoms;
+	residueAtomIndicesCU(_chainIndex, _resIndex, resAtoms);
+	if (resAtoms.empty()) {return 1E30;}
+
+	// The candidate arrays are addressed as k * N + atom, but only the thaw
+	// set is ever read out of them, so they are left unwritten outside the
+	// moved residue until the thaw set is known and the few entries that
+	// matter can be filled directly.  Seeding all of them from the entry
+	// geometry instead is several megabytes of memcpy per batch to supply
+	// values that are, by construction, unchanged.
+	vector < vector < vector <double> > > confs(_numCandidates);
+	vector <double> bx((size_t)_numCandidates * N, 0.0),
+	                by((size_t)_numCandidates * N, 0.0),
+	                bz((size_t)_numCandidates * N, 0.0);
+	for (UInt k = 0; k < _numCandidates; k++)
+	{
+		confs[k] = randContinuousSidechainConformation(_chainIndex, _resIndex);
+		setSidechainDihedralAngles(_chainIndex, _resIndex, confs[k]);
+		refreshDeviceCoords(resAtoms);
+		const size_t off = (size_t)k * N;
+		for (size_t m = 0; m < resAtoms.size(); m++)
+		{
+			const int i = resAtoms[m];
+			bx[off + i] = itsCoordX[i]; by[off + i] = itsCoordY[i]; bz[off + i] = itsCoordZ[i];
+		}
+	}
+	setSidechainDihedralAngles(_chainIndex, _resIndex, entryConf);
+	refreshDeviceCoords(resAtoms);
+	// Seed the spatial order from the entry conformation, so every candidate is
+	// culled and ranked against the same order and the delta's tile list means
+	// the same thing for all of them.
+	energySetCoords(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0]);
+
+	// The thaw set is the batch's, not any one candidate's, and it has to be
+	// installed before the pre-move part is measured: P(old) and P(new) must be
+	// taken over the same set or the difference is not a difference.
+	int nMoved = 0;
+	const int nThaw = protThawDielectricForBatchCU(oldX, oldY, oldZ, bx, by, bz,
+	                                               (int)_numCandidates, 0.0, &nMoved,
+	                                               1e-9, &resAtoms);
+	if (nThaw <= 0) {return 1E30;}
+
+	// Fill in the thawed atoms outside the moved residue.  They are unchanged
+	// by definition, but the batch reads coordinates for every atom of the
+	// changed set and will not infer that.
+	{
+		vector<unsigned char> isRes((size_t)N, 0);
+		for (size_t m = 0; m < resAtoms.size(); m++) {isRes[resAtoms[m]] = 1;}
+		for (size_t t = 0; t < itsThawList.size(); t++)
+		{
+			const int a = itsThawList[t];
+			if (isRes[a]) {continue;}
+			for (UInt k = 0; k < _numCandidates; k++)
+			{
+				const size_t o = (size_t)k * N + a;
+				bx[o] = oldX[a]; by[o] = oldY[a]; bz[o] = oldZ[a];
+			}
+		}
+	}
+
+	double pOld = 0.0, torOld = 0.0;
+	if (energyComputeDelta(itsEnergyContext, 0, 0, 0, &itsThawList[0],
+	                       (int)itsThawList.size(), &pOld, &torOld))
+	{	return 1E30; }
+
+	vector<double> parts(_numCandidates, 0.0), tors(_numCandidates, 0.0);
+	if (energyComputeBatchDelta(itsEnergyContext, (int)_numCandidates,
+	                            &bx[0], &by[0], &bz[0], &itsThawList[0],
+	                            (int)itsThawList.size(), &parts[0], &tors[0]))
+	{
+		cout << "protein::bestSidechainCandidateDeltaCU failed: "
+		     << energyLastError(itsEnergyContext) << endl;
+		return 1E30;
+	}
+
+	UInt best = 0; double bestE = 1E30;
+	if (_allEnergies) {_allEnergies->assign(_numCandidates, 0.0);}
+	for (UInt k = 0; k < _numCandidates; k++)
+	{
+		const double e = _nbCurrent - pOld + parts[k] + tors[k];
+		if (_allEnergies) {(*_allEnergies)[k] = e;}
+		if (k == 0 || e < bestE) {bestE = e; best = k;}
+	}
+	if (_allConfs) {*_allConfs = confs;}
+	_bestConf = confs[best];
+	_nbBest = _nbCurrent - pOld + parts[best];
+	_torBest = tors[best];
+	return bestE;
 }
 
 int protein::setDeviceReplicas(int _nRepl)

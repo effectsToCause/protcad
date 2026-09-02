@@ -248,6 +248,45 @@ public:
 	                                const std::vector<double>& _oldZ,
 	                                double _radius = 0.0, int* _movedOut = 0,
 	                                double _tol = 1e-9);
+	// Refresh the held dielectric from the field the last delta left resident,
+	// instead of recomputing it.  Exact for the same reason the exemption
+	// radius is; see energyRefreezeDielectric.
+	bool protRefreezeDielectricCU();
+	// How many atoms the current thaw set holds, for reporting how much of the
+	// structure a delta actually has to touch.
+	int protDielectricThawCountCU();
+	// Device-order indices of one residue's atoms.  A sidechain move touches
+	// only these, so a candidate batch never needs a full coordinate refresh.
+	void residueAtomIndicesCU(UInt _chainIndex, UInt _resIndex,
+	                          std::vector<int>& _out);
+	// Thaw the union of what a whole batch of candidate conformations perturbs.
+	// _cand* are _nCand * numAtoms coordinate arrays in device-order.  Exact:
+	// the set is a superset of every individual candidate's, built from a
+	// per-moved-atom bounding sphere over the candidates rather than from an
+	// O(N |A| K) pairwise scan, which would cost more on the host than the
+	// batch saves on the device.
+	int protThawDielectricForBatchCU(const std::vector<double>& _oldX,
+	                                 const std::vector<double>& _oldY,
+	                                 const std::vector<double>& _oldZ,
+	                                 const std::vector<double>& _candX,
+	                                 const std::vector<double>& _candY,
+	                                 const std::vector<double>& _candZ,
+	                                 int _nCand, double _radius = 0.0,
+	                                 int* _movedOut = 0, double _tol = 1e-9,
+	                                 const std::vector<int>* _support = 0);
+	// Steepest descent over a candidate batch, evaluated as deltas against a
+	// held dielectric rather than as full energies.  _nbCurrent is the
+	// nonbonded part of the current total; the winner's nonbonded part and
+	// torsion come back in _nbBest and _torBest so the caller can carry the
+	// anchor forward.  Returns the winner's total energy, or 1E30 on failure,
+	// in which case nothing has been committed.
+	double bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
+	                                     UInt _numCandidates,
+	                                     std::vector < std::vector <double> > &_bestConf,
+	                                     double _nbCurrent, double& _nbBest,
+	                                     double& _torBest,
+	                                     std::vector<double>* _allEnergies = 0,
+	                                     std::vector < std::vector < std::vector <double> > >* _allConfs = 0);
 	void updateResidueEnergiesCU();
 	void updateResidueClashesCU();
 	UInt getNumHardBackboneClashesCU();
