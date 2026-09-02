@@ -105,3 +105,45 @@ different order.
    `bestSidechainCandidateCU` can adopt it without restructuring.
 4. Re-anchoring and the paired-chain drift test.
 5. Only then wire it into `protMinReplicaCU`.
+
+## Where this landed
+
+Steps 1-5 are done, as `energyComputeBatchDelta`, `bestSidechainCandidateDeltaCU`
+and the chain in `protMinCU`. Three things came out differently from the plan.
+
+The restricted-sum kernels were not written. `kEnergy` and `kOccupancy` were
+already both candidate-aware and changed-set aware, and `kTorsion` already took
+a torsion list and a candidate count together, so the batch delta is those
+kernels launched over `nCand x C` rather than new machinery.
+
+The chain needs `energyRefreezeDielectric`, which is not in the plan above and
+without which none of it reaches wall clock. Carrying a held field across
+accepted moves means refreshing it after each one, and freezing again from
+coordinates recomputes occupancy over every pair -- most of a full evaluation,
+capping the whole approach near 2x. It does not need recomputing: after a delta
+the resident field already is the new conformation's, so the refresh is a
+snapshot.
+
+The bloat estimate above was for a static superset over a full sidechain sweep,
+and it turns out to describe a 32-candidate batch too, because a batch of random
+conformations covers that sweep. Measured union changed set: 37% of 1crn, 30% of
+1ubq, 21% of 2lzm, 6.3% of 1ake. That is the whole story of the result. Over 200
+moves the chain runs 1.11x on 1crn, 1.43x on 1ubq, 2.19x on 2lzm and 3.49x on
+1ake, and the delta is only worth having above roughly two thousand atoms.
+
+The host-side floor bit again, in the same way and for the same reason as the
+single-move delta. Rebuilding all N coordinates from the atom pointers once per
+candidate grows with the whole structure while a sidechain move does not, and it
+was the dominant cost of both the delta and the full path. Building candidates
+by refreshing only the moved residue took 1ake from 2.33x to 3.94x per batch.
+
+Drift over 64 accepted moves is 5.5e-4 to 2.8e-3 kcal/mol against totals of
+several hundred to a thousand, and the carried energy finishes within 8e-4 of a
+coupled evaluation. The re-anchor interval of 64 is comfortable, not tight.
+
+`protMin` cannot be used to time any of this. Its plateau counter does not
+survive a batched move -- steepest descent over 32 candidates almost always
+finds some improvement, so the counter resets on nearly every trial and the loop
+runs far past where a single-candidate move would stop. `minChainBench` drives
+the same path over a fixed move count instead. Fixing the termination criterion
+for batched moves is a separate open problem.
