@@ -1986,7 +1986,10 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	// for the batch delta) is written below before either runs, so the buffer
 	// only needs to be large enough, not clean.
 	vector < vector < vector <double> > > confs(_numCandidates);
-	const size_t bneed = (size_t)_numCandidates * N;
+	// One slot past the candidates holds the entry conformation, so the
+	// pre-move part is evaluated by the same call, in the same batch, over the
+	// same changed set as everything it will be subtracted from.
+	const size_t bneed = (size_t)(_numCandidates + 1) * N;
 	if (itsBatchX.size() < bneed)
 	{	itsBatchX.resize(bneed); itsBatchY.resize(bneed); itsBatchZ.resize(bneed); }
 	vector<double>& bx = itsBatchX;
@@ -2007,6 +2010,14 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	}
 	setSidechainDihedralAngles(_chainIndex, _resIndex, entryConf);
 	refreshDeviceCoords(resAtoms);
+	{
+		const size_t off = (size_t)_numCandidates * N;
+		for (size_t m = 0; m < resAtoms.size(); m++)
+		{
+			const int i = resAtoms[m];
+			bx[off + i] = oldX[i]; by[off + i] = oldY[i]; bz[off + i] = oldZ[i];
+		}
+	}
 	if (g_deltaProfOn) {g_deltaProf.t[1] += profNow() - _p1;}
 	// Seed the spatial order from the entry conformation, so every candidate is
 	// culled and ranked against the same order and the delta's tile list means
@@ -2037,7 +2048,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 		{
 			const int a = itsThawList[t];
 			if (isRes[a]) {continue;}
-			for (UInt k = 0; k < _numCandidates; k++)
+			for (UInt k = 0; k <= _numCandidates; k++)
 			{
 				const size_t o = (size_t)k * N + a;
 				bx[o] = oldX[a]; by[o] = oldY[a]; bz[o] = oldZ[a];
@@ -2046,16 +2057,22 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	}
 
 	if (g_deltaProfOn) {g_deltaProf.t[3] += profNow() - _p3;}
-	const double _p5 = g_deltaProfOn ? profNow() : 0.0;
-	double pOld = 0.0, torOld = 0.0;
-	if (energyComputeDelta(itsEnergyContext, 0, 0, 0, &itsThawList[0],
-	                       (int)itsThawList.size(), &pOld, &torOld))
-	{	return 1E30; }
-
-	if (g_deltaProfOn) {g_deltaProf.t[5] += profNow() - _p5;}
+	// The pre-move part used to be its own energyComputeDelta call.  It was
+	// evaluating one conformation with the machinery built for thirty-two, so
+	// it paid a full set of launches and a staging round trip for a
+	// thirty-second of the work -- 12% of a trial on 1ake against 57% for the
+	// batch that does the other thirty-two.  Widening the batch by one is a
+	// few percent of a call that already exists.
+	//
+	// It also removes a real asymmetry rather than only cost.  P(old) and
+	// P(new) have to be taken over the same changed set for their difference
+	// to mean anything, and they were -- but by two different code paths with
+	// two different reduction orders, so the difference carried the gap
+	// between the paths as well as the move.  Now both come out of one call.
 	const double _p6 = g_deltaProfOn ? profNow() : 0.0;
-	vector<double> parts(_numCandidates, 0.0), tors(_numCandidates, 0.0);
-	if (energyComputeBatchDelta(itsEnergyContext, (int)_numCandidates,
+	const int nEval = (int)_numCandidates + 1;
+	vector<double> parts(nEval, 0.0), tors(nEval, 0.0);
+	if (energyComputeBatchDelta(itsEnergyContext, nEval,
 	                            &bx[0], &by[0], &bz[0], &itsThawList[0],
 	                            (int)itsThawList.size(), &parts[0], &tors[0]))
 	{
@@ -2065,6 +2082,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	}
 
 	if (g_deltaProfOn) {g_deltaProf.t[6] += profNow() - _p6;}
+	const double pOld = parts[_numCandidates];
 	const double _p7 = g_deltaProfOn ? profNow() : 0.0;
 	UInt best = 0; double bestE = 1E30;
 	if (_allEnergies) {_allEnergies->assign(_numCandidates, 0.0);}

@@ -349,3 +349,42 @@ to be the largest. Profile in place, or do not profile.
 
 Current per-trial shape on 1ake: batch delta 57%, `energyComputeDelta` for the
 pre-move part 12%, thaw set construction 10%, setup 7%, candidate generation 6%.
+
+## Folding the pre-move evaluation into the batch
+
+With the batch delta down to a reasonable shape, the next line in the profile
+was the pre-move part: `energyComputeDelta` for P(old), at 19% of a trial on
+1crn and 12% on 1ake. It was evaluating a single conformation with the
+machinery built for thirty-two, paying a full set of launches and a staging
+round trip for a thirty-second of the work. Widening the existing batch by one
+slot costs a few percent of a call that already runs.
+
+The stronger argument is correctness rather than cost. P(old) and P(new) have
+to be taken over the same changed set for their difference to mean anything,
+and they were -- the thaw set is installed before either runs -- but they were
+computed by two different code paths with two different reduction orders, so
+the subtraction carried the gap between the paths as well as the effect of the
+move. Both now come out of one call, over one changed set, in one reduction
+order. `batchDeltaTest`'s worst relative error moves from 2.39e-07 to 3.21e-07,
+which is P(old) changing paths, not accuracy being lost; the gate is 5e-6.
+
+| structure | before | after |
+|-----------|--------|-------|
+| 1crn | 1198 us/trial | **1050** |
+| 1ubq | 1847 us/trial | **1673** |
+| 1ake | 3891 us/trial | **3675** |
+
+1ake over 512 trials: 2.68 -> 2.47 s wall.
+
+Cumulative for the session, against the host-reduction baseline: 2317 -> 1050
+us/trial on 1crn (2.21x), 3666 -> 1673 on 1ubq (2.19x), 8286 -> 3675 on 1ake
+(2.25x).
+
+What is left on 1ake is batch delta 66%, thaw set construction 12%, setup 8%,
+candidate generation 7%. Thaw set construction is host work that rebuilds a
+bounding-sphere set per trial, and `setup` is still the full-N
+`updateDeviceCoords()` at the top of the function. Neither is the dominant term
+any more, and the batch delta's remaining cost is now mostly `kEnergy` plus H2D
+staging latency that does not scale with structure size -- which is where the
+question of keeping coordinates device-resident finally becomes the right one
+to ask.
