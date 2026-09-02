@@ -2845,6 +2845,105 @@ bool protein::minDeltaCommitCU(double _nbBest, double& _nbCurrent)
 	return true;
 }
 
+
+// Termination for protMinCU.
+//
+// The criterion this replaces counted consecutive trials with no improvement
+// better than KT and stopped once that count reached `plateau`.  That is a
+// hitting time, and it measures a property of the proposal mechanism rather
+// than of the trajectory.  It worked for a first-improvement move on a single
+// candidate, whose success probability really does fall towards zero as the
+// structure converges.  It does not survive steepest descent over a batch of
+// 32: some candidate clears the KT bar on nearly every trial no matter how well
+// optimised the structure already is, so the counter resets almost every
+// iteration and the required run of consecutive failures effectively never
+// occurs.  A 1crn minimisation that took 13 s under the old move ran for 83
+// minutes without terminating.
+//
+// protMinReplicaCU answered that by refusing to measure anything and taking a
+// fixed sweep budget instead, on the argument that a sampler's cost should be
+// chosen rather than discovered.  That is right for sampling an ensemble and
+// wrong here, because a fixed budget spends the same wall clock on a structure
+// that is already good as on one that needs deep optimisation, which is the
+// entire distinction a minimiser is asked to make.
+//
+// What makes a trajectory criterion possible is the shape of the descent, and
+// the shape is roughly log-linear -- protMinReplicaCU measures about 59 kcal/mol
+// per e-fold of budget on 1ubq.  Improvement per *fixed* window therefore
+// decays like 1/B by construction and has no plateau to detect, which is the
+// deeper reason the old counter had nothing to converge on.  Improvement per
+// *doubling* of the budget is the quantity that is flat under that law, so it
+// is the one whose decay actually signals diminishing returns.
+//
+// Hence: checkpoint at geometrically spaced trial counts, and at each
+// checkpoint compare the best energy seen against the best energy seen one
+// doubling ago.  Stop when a doubling of the entire budget spent so far buys
+// less than `gainTol`.  Measured over 1 -> 256 sweeps, gain per doubling:
+//
+//     1crn  13.1  3.7  10.0  12.7  5.9  3.0  0.8  1.4  0.0
+//     1ubq 103   495   50.3  49.0 30.0 14.3 38.2
+//
+// 1crn is spent by 64 sweeps having recovered 49.1 of 50.5 available kcal/mol;
+// 1ubq is still buying 38 kcal/mol per doubling at 64 sweeps and should keep
+// going.  A single absolute threshold separates them, and this is exactly the
+// adaptivity a budget cannot express.
+//
+// The threshold is deliberately absolute rather than a fraction of the gain so
+// far.  At the checkpoint where 1crn has 1.4 kcal/mol left to win and 1ubq has
+// 58, both have last-doubling gains near 1.8% of their cumulative gain, so a
+// relative rule cannot tell them apart and would stop 1ubq far too early.  What
+// matters is whether more work buys a meaningful amount of energy, not a
+// meaningful fraction of an extensive quantity.
+//
+// Two properties fall out for free.  Overshoot is bounded: the criterion can
+// never spend more than twice the work that was actually productive, because
+// checkpoints double.  And the unit of work is a sweep -- one trial per
+// residue -- so the budget scales with the structure without any constant
+// needing to be retuned per size.
+//
+// `staleNeeded` guards against the noise visible above, where 1crn dips to 0.8
+// and recovers to 1.4 and 1ubq dips to 14.3 and recovers to 38.2.  It is 1 by
+// default because insurance costs a doubling and the recovered amounts are
+// small next to the threshold; raise it when final energy matters more than
+// wall clock.
+struct minStopCU
+{
+	double gainTol, best, bestAtHalf;
+	UInt staleNeeded, maxTrials, trial, nextCheck, stale, sweep;
+	bool debug;
+
+	static double envD(const char* n, double d)
+	{	const char* v = getenv(n); return v ? atof(v) : d; }
+	static UInt envU(const char* n, UInt d)
+	{	const char* v = getenv(n); return v ? (UInt)atol(v) : d; }
+
+	minStopCU(UInt _sweep, double _startEnergy, bool _debug)
+	{
+		sweep = _sweep < 1 ? 1 : _sweep;
+		gainTol     = envD("PROTCAD_MIN_GAIN", 1.0);
+		staleNeeded = envU("PROTCAD_MIN_STALE", 2);
+		maxTrials   = envU("PROTCAD_MIN_MAXSWEEPS", 256) * sweep;
+		best = bestAtHalf = _startEnergy;
+		trial = 0; nextCheck = sweep; stale = 0; debug = _debug;
+	}
+
+	// Called once per trial with the energy of the accepted conformation.
+	void observe(double _energy)
+	{
+		trial++;
+		if (_energy < best) {best = _energy;}
+		if (trial < nextCheck) {return;}
+		const double gain = bestAtHalf - best;
+		if (gain <= gainTol) {stale++;} else {stale = 0;}
+		if (debug)
+		{	cout << "protMinCU: " << (double)trial / sweep << " sweeps, best "
+			     << best << ", gain/doubling " << gain << ", stale " << stale << endl; }
+		bestAtHalf = best; nextCheck *= 2;
+	}
+
+	bool done() const {return stale >= staleNeeded || trial >= maxTrials;}
+};
+
 void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains, UInt _plateau)
 {
 	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
@@ -2875,6 +2974,13 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 	bool anchored = false, havePending = false;
 	double nbCurrent = 0.0, pendingNb = 0.0, worstDrift = 0.0;
 	int sinceAnchor = 0;
+	// Stop when a doubling of the budget stops paying; see minStopCU above.
+	static const bool legacyStop = (getenv("PROTCAD_MIN_PLATEAU") != 0);
+	UInt sweepTrials = 0;
+	for (UInt ci = 0; ci < _activeChains.size(); ci++)
+	{	sweepTrials += getNumResidues(_activeChains[ci]); }
+	if (sweepTrials > _frozenResidues.size()) {sweepTrials -= _frozenResidues.size();}
+	minStopCU stop(sweepTrials, pastEnergy, deltaDebug);
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -3014,7 +3120,8 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 				setSidechainDihedralAngles(randchain, randres, currentSidechainConf);
 			}
 		}
-	} while (nobetter < plateau);
+		stop.observe(pastEnergy);
+	} while (legacyStop ? (nobetter < plateau) : !stop.done());
 	// A rejected move leaves the device at the entry geometry, so the chain
 	// survives it untouched; only the exit has to put the coupled model back.
 	if (anchored)
@@ -3056,6 +3163,12 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 	bool anchored = false, havePending = false;
 	double nbCurrent = 0.0, pendingNb = 0.0, worstDrift = 0.0;
 	int sinceAnchor = 0;
+	// Stop when a doubling of the budget stops paying; see minStopCU above.
+	static const bool legacyStop = (getenv("PROTCAD_MIN_PLATEAU") != 0);
+	UInt sweepTrials = 0;
+	for (UInt ci = 0; ci < getNumChains(); ci++)
+	{	sweepTrials += getNumResidues(ci); }
+	minStopCU stop(sweepTrials, pastEnergy, deltaDebug);
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -3188,7 +3301,8 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 				setSidechainDihedralAngles(randchain, randres, currentSidechainConf);
 			}
 		}
-	} while (nobetter < plateau);
+		stop.observe(pastEnergy);
+	} while (legacyStop ? (nobetter < plateau) : !stop.done());
 	// A rejected move leaves the device at the entry geometry, so the chain
 	// survives it untouched; only the exit has to put the coupled model back.
 	if (anchored)

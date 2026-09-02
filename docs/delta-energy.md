@@ -147,3 +147,62 @@ finds some improvement, so the counter resets on nearly every trial and the loop
 runs far past where a single-candidate move would stop. `minChainBench` drives
 the same path over a fixed move count instead. Fixing the termination criterion
 for batched moves is a separate open problem.
+
+## Closing the plateau problem
+
+The "Where this landed" section left the termination criterion open. It is now
+closed, and the fix is not in this file's subject matter at all -- it is in what
+the criterion was measuring.
+
+`nobetter` counted consecutive trials with no improvement better than KT. That
+is a hitting time on the *proposal mechanism*, and it is only meaningful while
+the per-trial success probability falls towards zero as the structure
+converges. Steepest descent over 32 candidates keeps that probability bounded
+away from zero indefinitely, so the counter resets almost every iteration and
+the required run of consecutive failures never occurs. This is why 1crn, 13 s
+under the old single-candidate move, ran past 6.5 minutes here and 83 minutes
+in the run `protMinReplicaCU` records.
+
+`protMinReplicaCU` answered by taking a fixed sweep budget and arguing a
+sampler's cost should be chosen rather than discovered. That is right for
+sampling and wrong for minimising, because a fixed budget spends the same wall
+clock on a structure that is already good as on one that is far from it.
+
+The criterion that works measures the *trajectory*. Descent here is roughly
+log-linear -- about 59 kcal/mol per e-fold of budget on 1ubq -- so improvement
+per fixed window decays like 1/B by construction and has no plateau to detect.
+Improvement per *doubling* is the quantity that is flat under that law. So:
+checkpoint at geometrically spaced trial counts, compare best-so-far against
+best-so-far one doubling earlier, and stop when a doubling of the whole budget
+spent so far buys less than a threshold. Overshoot is bounded at 2x by
+construction, and the unit of work is a sweep -- one trial per residue -- so
+nothing needs retuning per structure size.
+
+The threshold is absolute, not a fraction of the gain so far. At the checkpoint
+where 1crn has 1.4 kcal/mol left to win and 1ubq has 58, both show a last
+doubling worth about 1.8% of their cumulative gain, so a relative rule cannot
+separate them and stops 1ubq far too early.
+
+Measured, running `protMinCU` repeatedly in one process so each pass starts from
+the conformation the last one left (`projects/minStopProbe.cc` -- a PDB round
+trip will not do, it reintroduces clashes and comes back at 373592 kcal/mol):
+
+|       | pass 1            | pass 2           | pass 3          |
+|-------|-------------------|------------------|-----------------|
+| 1crn  | 492.8 -> 440.0, 30.7 s | 440.0 -> 442.4, 0.97 s | 442.4 -> 441.3, 1.9 s |
+| 1ubq  | 987.2 -> 204.6, 171 s  | 204.6 -> 189.4, 86 s   | 189.4 -> 191.8, 2.7 s |
+
+That is the adaptivity a budget cannot express: 1ubq gets a second full-cost
+pass because it is still buying 15 kcal/mol, and both structures fall to a
+couple of seconds once they are spent.
+
+Two things this does not fix, both visible above. Passes 2 and 3 can end
+slightly *worse* than they started, because the walk accepts uphill moves at KT
+and returns its final conformation rather than the best one it saw; the excursions
+are a few KT, but a minimiser that can hand back a worse structure than it was
+given is a defect worth closing separately -- `saveCurrentState`/`undoState`
+would do it, at the cost of reasoning carefully about the delta chain's device
+coordinates. And on 1crn the descent never actually flattens below 1 kcal/mol
+per doubling, so the 256-sweep cap is doing the stopping there, not the
+criterion. The knob is real; there is no free lunch on a structure that keeps
+paying a little forever.

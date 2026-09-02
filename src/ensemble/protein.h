@@ -348,6 +348,14 @@ public:
 	double relaxSidechainsCU(UIntVec _frozenResidues, UIntVec _activeChains, UInt _maxSweeps);
 	void protRelaxCU(UInt _sweeps, bool _backbone);
 	void protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains);
+	// Termination is by diminishing returns per doubling of the budget, not by
+	// the consecutive-failure count these routines used to run on -- that
+	// counter does not survive a batched move and effectively never fires.  See
+	// minStopCU in protein.cc.  `_plateau` is retained only for the legacy path,
+	// reachable with PROTCAD_MIN_PLATEAU=1; the live knobs are PROTCAD_MIN_GAIN
+	// (kcal/mol bought per doubling, below which the run is spent),
+	// PROTCAD_MIN_STALE (consecutive such checkpoints required) and
+	// PROTCAD_MIN_MAXSWEEPS (hard bound).
 	void protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains, UInt _plateau = 1000);
 	void protMinCU(bool _backbone, UInt _plateau = 1000);
 
