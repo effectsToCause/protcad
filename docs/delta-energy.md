@@ -843,3 +843,50 @@ that successive passes are **monotone**, and that the search reaches a **fixed
 point** (each pass's `start` exactly equals the previous pass's `end`). For a
 reproducible energy, use `minStopBench`, which takes an explicit seed and is
 deterministic run to run.
+
+## What fraction is actually physics
+
+The earlier "~70% traversal, 30% arithmetic" split came from a two-point
+ablation and is **wrong**. That harness switched off terms inside the pair loop
+while still computing the distance, and still computing `shellFromOcclusion`
+during staging -- so a large block of real arithmetic was counted as traversal.
+
+Re-measured on the current kernel with a four-level ablation, 1ake, 64 trials,
+best of two. Each level adds one layer back:
+
+| level | what runs | kEnergy (instrumented) | layer cost |
+|---|---|---|---|
+| 3 | j-tile loop + boxBox rejection only | 137.7 us | 137.7 |
+| 2 | + shared-memory staging | 187.8 us | 50.1 |
+| 1 | + inner k loop, distance, cutoff test | 444.1 us | 256.3 |
+| 0 | + exclusion, switch, LJ, electrostatics | 934.5 us | 490.4 |
+
+The instrumented build costs 5% over the clean 888 us, so scaled to clean:
+
+| layer | us/trial | of kEnergy |
+|---|---|---|
+| tile traversal + boxBox | 131 | 15% |
+| staging | 48 | 5% |
+| distance + cutoff reject | 244 | 27% |
+| **pair physics** | **466** | **52%** |
+
+So against a ~2100 us trial, the irreducible LJ-plus-electrostatics work on the
+7.5M surviving pairs is **~466 us, about 22% of wall clock**. The rest of the
+trial is the occupancy kernel (329 us), the torsion kernel (358 us), the host
+setup and coordinate upload (~285 us), and the reduce/stage/bounds tail.
+
+Two things follow.
+
+The addressable pool inside kEnergy is **375 us**, not the ~700 us implied by
+the old split -- that is the traversal plus the distance-and-reject layer. The
+pair list would attack exactly that 375 us and would pay for it in the wider
+streamed record and the scattered dielectric gather, which is why the byte
+count still argues against it. It is a much narrower prize than the previous
+note claimed.
+
+The more interesting number is that **the reject layer alone costs 244 us**,
+more than half the addressable pool, and `kOccupancy` spends another 329 us
+walking essentially the same neighbourhood a second time. Two independent
+traversals of one neighbour structure is the redundancy worth looking at next,
+and it is the same lesson as the last two wins: the win was never cheaper
+physics, it was work being done more than once.
