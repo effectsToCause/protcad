@@ -503,7 +503,27 @@ int energyComputeDelta(energyContext* ctx,
                        const int* atoms, int count,
                        double* partOut, double* torsionOut);
 
+// Refresh the held field from the occupancy currently resident on the device,
+// which after a delta is exactly the field of the conformation just evaluated.
+// This is what makes a chain of deltas affordable: the alternative, freezing
+// again from coordinates, recomputes occupancy over every atom pair.
+int energyRefreezeDielectric(energyContext* ctx);
+
 int energyDielectricThawCount(const energyContext* ctx);
+
+// As energyComputeDelta, but for nCand candidate conformations of the same
+// move at once.  x, y and z are nCand * numAtoms arrays in original atom order;
+// only the entries named by `atoms` are read, since every candidate is seeded
+// from the resident conformation and differs from it nowhere else.  `atoms`
+// must be exactly the thaw set, and must be the union over all candidates --
+// each candidate's own moved atoms are a subset of it.  partOut and torsionOut
+// receive nCand values, and candidate k's total is
+// E_old - P(old) + partOut[k] + torsionOut[k], the same identity the
+// single-candidate delta uses.
+int energyComputeBatchDelta(energyContext* ctx, int nCand,
+                            const double* x, const double* y, const double* z,
+                            const int* atoms, int count,
+                            double* partOut, double* torsionOut);
 
 // Return to the fully coupled model.
 int energyReleaseDielectric(energyContext* ctx);
