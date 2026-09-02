@@ -3726,6 +3726,26 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
     const int DSPLIT_MAX = 64;
     const long rows = (long)nList * nCand;
     int dSplit = rows > 0 ? (int)((targetWarps() + rows - 1) / rows) : 1;
+
+    // The targetWarps rule only asks whether the grid fills the device, which
+    // is the wrong question here.  A row's j-tile loop length varies by nearly
+    // an order of magnitude between a buried i-tile and a surface one, so the
+    // block that draws the densest neighbourhood sets the kernel's duration
+    // while the rest of the wave idles.  Splitting the j range further cuts the
+    // longest block down without changing the total work.
+    //
+    // Measured on 1crn, 1ubq, 2lzm and 1ake the optimum sits at 8-16 and is
+    // essentially independent of system size, which is what a load balance
+    // effect looks like and is not what a device fill effect would look like.
+    // Take the larger of the two rules: the fill rule still governs tiny
+    // systems, this floor governs everything else.
+    const int DSPLIT_BALANCE = 12;
+    if (dSplit < DSPLIT_BALANCE) dSplit = DSPLIT_BALANCE;
+
+    if (const char* dsEnv = getenv("PROTCAD_BATCH_DSPLIT")) {
+        const int v = atoi(dsEnv);
+        if (v > 0) dSplit = v;
+    }
     if (dSplit > nT) dSplit = nT;
     if (dSplit > DSPLIT_MAX) dSplit = DSPLIT_MAX;
     if (dSplit < 1) dSplit = 1;

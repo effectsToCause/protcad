@@ -940,3 +940,85 @@ ratio but only a 0.72 time ratio. Tile-level pruning and the fixed traversal
 do not shrink with the radius, which is consistent with the layered ablation:
 the traversal-and-staging floor is ~180 us regardless of how much physics
 survives.
+
+## Are we computing each distance once? Yes -- and that was never the problem
+
+Reading the kEnergy pair loop settles the direct question. `r2` is formed once
+per pair, `switchFn` takes `r2` rather than recomputing a distance, and the one
+`esqrt` feeds only the electrostatic denominator. Within the kernel there is no
+duplicated distance. Across kernels kOccupancy recomputes its own, and the
+section above measures that fusing the two is not worth it.
+
+But the arithmetic says that is the wrong thing to be optimising. Per trial the
+kernel examines ~74M lane-pairs and ~10M survive, which is roughly 750M thread
+instructions, or **42-84 us** at the 3090's issue rate. DRAM traffic works out
+near **75 us**. kEnergy takes **888 us**. It is running at 5-10% of every
+throughput limit it has, which is also why removing a 37x redundancy in divides
+earlier bought only 6%. Nothing in the pair loop is worth micro-optimising until
+that gap is explained.
+
+### Lane divergence is real but small
+
+The obvious explanation is that the `continue` on the cutoff test only saves
+work when all 32 lanes agree. Counters on the ballot say otherwise:
+
+    examined 4709M lane-pairs, 666M survived (14.1%)
+    warp k-iterations 329M, of which 76M had any survivor (23.0%)
+    lane efficiency within those: 8.78/32 = 27.4%
+    physics issued for 2426M lane-slots to do 666M pairs => 3.64x waste
+
+I predicted the physics block would issue on ~99.5% of iterations. It issues on
+23%. Lanes in a warp hold spatially adjacent i-atoms, so a far j-tile is far
+from all of them at once -- the tile structure buys good lane coherence for
+free. The waste factor is 3.64x, not 32x, and perfect compaction could recover
+at most ~340 us before paying for the compaction itself.
+
+### The real cause: occupancy and load imbalance
+
+kEnergy uses **72 registers**. On GA102 that is 65536/(72*32) = **28 resident
+warps per SM, not 48** -- 58% occupancy. An earlier note in this document
+claimed the grid "saturates the 3090" at 3960 warps against 3936 slots; that
+computed against theoretical maximum occupancy and was wrong. True capacity is
+82 * 28 = 2296 warps.
+
+Sweeping the j-split directly, on 1ake at 64 trials:
+
+| dSplit | kEnergy | batchDelta | us/trial |
+|---|---|---|---|
+| 1 | 1223.2 | 2226.8 | 2553.0 |
+| 2 | 980.7 | 1852.2 | 2179.5 |
+| 3 (old default) | 903.4 | 1746.4 | 2073.3 |
+| 4 | 855.2 | 1680.4 | 2011.9 |
+| 6 | 821.0 | 1620.7 | 1948.5 |
+| 8 | 810.0 | 1607.4 | 1941.9 |
+| 12 | 815.0 | 1604.2 | 1934.9 |
+
+`reduce + D2H` stays flat at ~47.5 us across the whole sweep, so the extra
+partials are free, and `d_bdpart` is already allocated at DSPLIT_MAX so there is
+no extra memory either.
+
+The decisive observation is that the optimum sits at 8-16 on 1crn, 1ubq, 2lzm
+and 1ake alike -- **independent of system size**. A device fill effect would
+move with system size; a load balance effect would not. A row's j-tile loop
+length varies by nearly an order of magnitude between a buried i-tile and a
+surface one, so the block drawing the densest neighbourhood sets the kernel's
+duration while the rest of the wave idles. Splitting j further shortens the
+longest block without changing total work.
+
+`dSplit` now takes the larger of the fill rule and a `DSPLIT_BALANCE = 12`
+floor, so the fill rule still governs tiny systems.
+
+| | kEnergy before | after | trial before | after |
+|---|---|---|---|---|
+| 1crn | 296.5 | 231.1 | 690.0 | 611.1 |
+| 1ubq | 387.7 | 356.3 | 912.9 | 867.1 |
+| 2lzm | 631.0 | 569.6 | 1353.1 | 1289.7 |
+| 1ake | 903.4 | 810.3 | 2073.3 | 1916.6 |
+
+8-10% off kEnergy and 5-11% off the trial, from a launch parameter. ctest 12/12,
+batchDeltaTest 1.93e-06 against the 5e-6 gate, and the 512-trial 1ake best is
+-310.4734, matching the baseline exactly. `PROTCAD_BATCH_DSPLIT` overrides it.
+
+The lesson is the same one the dielectric and exclusion hoists taught: the wins
+are in work being done redundantly or in resources being left idle, not in the
+physics. The pair loop was already clean.
