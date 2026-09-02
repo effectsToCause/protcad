@@ -4020,6 +4020,17 @@ static int clashComputeImpl(energyContext* ctx,
                             const double* x, const double* y, const double* z,
                             int* clashCountOut, int* perAtomOut);
 
+// Drop the per-torsion baseline.  h_torE is the only authority on what
+// "unchanged" means, and a coordinate upload does not clear it -- deliberately,
+// since the minimiser re-uploads every trial and would otherwise never keep a
+// baseline at all.  A caller that moves the structure to an unrelated
+// conformation must say so explicitly, or the next torsion delta is computed
+// against a geometry that was abandoned.
+void energyInvalidateTorsionBaseline(energyContext* ctx)
+{
+    if (ctx) ctx->torPrimed = 0;
+}
+
 int energySetCoords(energyContext* ctx,
                     const double* x, const double* y, const double* z)
 {

@@ -581,6 +581,8 @@ int clashComputeAtoms(energyContext* ctx,
 // that upload and then delegate.
 
 // Upload host coordinates into the resident device state.
+void energyInvalidateTorsionBaseline(energyContext* ctx);
+
 int energySetCoords(energyContext* ctx,
                     const double* x, const double* y, const double* z);
 

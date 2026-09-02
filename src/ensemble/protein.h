@@ -305,6 +305,10 @@ public:
 	void setEnergyParamsOverride(const energyParams& _p);
 	int updateDeviceCoords();
 	void refreshDeviceCoords(const std::vector<int>& _atoms);
+	void snapshotConformationCU(std::vector<double>& _x, std::vector<double>& _y,
+	                            std::vector<double>& _z);
+	void restoreConformationCU(const std::vector<double>& _x, const std::vector<double>& _y,
+	                           const std::vector<double>& _z);
 	// Register sidechain rotation groups with the energy context so candidate
 	// conformations are generated on the device. Returns the number of groups.
 	int buildRotationGroups();

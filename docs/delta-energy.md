@@ -529,3 +529,88 @@ in the batch delta itself, which is 58% `kEnergy`, 18% occupancy and 18%
 torsion.  The remaining host cost is the two full-N passes that are left, and
 neither can go away without deciding when the coordinate arrays may be trusted
 to be stale.  That is a correctness question, not a performance one.
+
+## Two correctness defects in the minimiser
+
+Both of these were invisible in the energies the minimiser reported and showed up
+only in what it did across repeated passes.
+
+### protMinCU returned its last conformation, not its best
+
+The loop accepts uphill moves, so the conformation it happens to stop on is not
+in general the best one it visited.  Running `minStopProbe` on 1crn for six
+passes in one process -- the only valid way to test this, since a PDB round trip
+reintroduces clashes and hands the second pass a different problem -- showed the
+structure drifting *upward* once it was near the minimum:
+
+    pass 1  492.791 -> 447.469
+    pass 2  447.469 -> 448.881
+    pass 3  448.881 -> 449.082
+    pass 4  449.082 -> 449.387
+    pass 6  447.650 -> 449.335
+
+Four of six passes ended worse than they started and there was no fixed point.
+
+The fix keeps a copy of every atom position whenever the accepted energy sets a
+new best, and restores it on exit.  Coordinates are the right thing to snapshot
+rather than dihedrals: `getChi` and the energy both read them, they capture
+backbone and cofactor moves as well as sidechain ones, and they do not go
+through the mutation buffers that `undoState` works on -- which exist to reverse
+mutations, not to rewind a search.  The bonding tree is untouched, so every
+dihedral accessor keeps working and reports the angles the snapshot was taken
+at.
+
+Restoring has to put the device back too, and there is a trap: `energySetCoords`
+does *not* clear `torPrimed`, deliberately, because the minimiser re-uploads
+coordinates every trial and would otherwise never hold a torsion baseline at
+all.  So a restore that only uploads coordinates leaves `h_torE` describing the
+conformation that was just abandoned.  `energyInvalidateTorsionBaseline` exists
+for exactly this and the restore path calls it.
+
+The snapshot fires only on improvement and costs nothing measurable: 1ake stays
+at 2199 us/trial.
+
+### boltzmannEnergyCriteria was a factor of two too cold
+
+    double Entropy = 1000000/((rand() % 1000000)+1);
+    double PiPj = pow(EU,(_deltaEnergy/residue::getKT()));
+    if (PiPj < Entropy){acceptance = true;}
+
+The positive exponent and the reciprocal random variable are two sign inversions
+that cancel, and the large-dE tail is right, so this looks worse than it is at
+first glance.  The actual defect is that `1000000/(...)` is **integer
+division**.  `Entropy` was `floor(1e6/U)`, which is never below 1 and is exactly
+1 for half of all draws.  Against a strict `<`, that gives
+
+    P(accept) = 1 / (floor(e^(dE/KT)) + 1)      instead of      e^(-dE/KT)
+
+Measured over 2e6 draws at KT = 0.6, the model is exact:
+
+    dE     old     correct
+    0.00   0.500   1.000
+    0.25   0.500   0.659
+    0.50   0.333   0.435
+    1.00   0.167   0.189
+    2.00   0.034   0.036
+
+Downhill moves were unaffected, which is why this never showed up as a bad
+energy.  It biased the walk instead: every uphill move up to dE = KT*ln2 was
+under-accepted, by a factor of two in the limit dE -> 0.  Those are most of what
+a Metropolis walk near a minimum proposes, so the search was substantially
+greedier than the temperature claimed.
+
+The replacement draws u uniform on (0, 1] and tests `exp(-dE/KT) >= u`.  The
+draw happens first and unconditionally so that the position of the RNG stream
+does not depend on the sign of the move.
+
+Attribution on 1crn, six passes, same seed:
+
+    variant             pass-1 wall   fixed point   monotone
+    baseline               16.67 s    none (~449)   no
+    best-conformation       8.22 s    446.474       yes
+    both                   16.64 s    444.344       yes
+
+Monotonicity comes entirely from the best-conformation fix.  The acceptance fix
+is worth a further 2.13 kcal, and the wall time tells you why: the too-cold
+sampler was converging falsely at 8.2 s.  Corrected, the pass costs what it cost
+before the best-conformation fix was added and now keeps what it finds.

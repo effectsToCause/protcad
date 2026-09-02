@@ -3184,6 +3184,11 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 	{	sweepTrials += getNumResidues(_activeChains[ci]); }
 	if (sweepTrials > _frozenResidues.size()) {sweepTrials -= _frozenResidues.size();}
 	minStopCU stop(sweepTrials, pastEnergy, deltaDebug);
+	// Best-so-far.  Boltzmann acceptance takes uphill moves, so the last
+	// conformation is not the best one; keep a copy and hand that back.
+	vector<double> bestX, bestY, bestZ;
+	double bestEnergy = pastEnergy;
+	snapshotConformationCU(bestX, bestY, bestZ);
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -3300,6 +3305,9 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
 			if (boltzmannAcceptance){
 				pastEnergy = Energy;
+				if (pastEnergy < bestEnergy)
+				{	bestEnergy = pastEnergy;
+					snapshotConformationCU(bestX, bestY, bestZ); }
 				if (havePending)
 				{
 					if (minDeltaCommitCU(pendingNb, nbCurrent)) {sinceAnchor++;}
@@ -3333,6 +3341,8 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 		if (deltaDebug)
 		{	cout << "protMinCU: worst re-anchor drift " << worstDrift << endl; }
 	}
+	// Hand back the best conformation seen, not the last one wandered into.
+	if (bestEnergy < pastEnergy) {restoreConformationCU(bestX, bestY, bestZ);}
 	return;
 }
 
@@ -3372,6 +3382,11 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 	for (UInt ci = 0; ci < getNumChains(); ci++)
 	{	sweepTrials += getNumResidues(ci); }
 	minStopCU stop(sweepTrials, pastEnergy, deltaDebug);
+	// Best-so-far.  Boltzmann acceptance takes uphill moves, so the last
+	// conformation is not the best one; keep a copy and hand that back.
+	vector<double> bestX, bestY, bestZ;
+	double bestEnergy = pastEnergy;
+	snapshotConformationCU(bestX, bestY, bestZ);
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -3481,6 +3496,9 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
 			if (boltzmannAcceptance){
 				pastEnergy = Energy;
+				if (pastEnergy < bestEnergy)
+				{	bestEnergy = pastEnergy;
+					snapshotConformationCU(bestX, bestY, bestZ); }
 				if (havePending)
 				{
 					if (minDeltaCommitCU(pendingNb, nbCurrent)) {sinceAnchor++;}
@@ -3514,6 +3532,8 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 		if (deltaDebug)
 		{	cout << "protMinCU: worst re-anchor drift " << worstDrift << endl; }
 	}
+	// Hand back the best conformation seen, not the last one wandered into.
+	if (bestEnergy < pastEnergy) {restoreConformationCU(bestX, bestY, bestZ);}
 	return;
 }
 
@@ -3590,11 +3610,23 @@ double protein::protEnergy(UInt chainIndex, UInt resIndex)
 
 bool protein::boltzmannEnergyCriteria(double _deltaEnergy) //calculate boltzmann probability of an energy to determine acceptance criteria
 {
-	bool acceptance = false;
-	double Entropy = 1000000/((rand() % 1000000)+1); //generate high precision random probability as entropy
-	double PiPj = pow(EU,(_deltaEnergy/residue::getKT()));
-	if (PiPj < Entropy){acceptance = true;}
-	return acceptance;
+	// The draw happens first and unconditionally: the position of the RNG
+	// stream must not depend on the sign of the move.  u is uniform on
+	// (0, 1] in steps of 1e-6.
+	const double u = ((rand() % 1000000) + 1) / 1000000.0;
+	if (_deltaEnergy <= 0.0) {return true;}
+	return exp(-_deltaEnergy / residue::getKT()) >= u;
+
+	// Was: Entropy = 1000000/((rand() % 1000000)+1), compared against
+	// pow(EU, +dE/KT).  The two sign inversions cancel and the tail is right,
+	// but 1000000/(...) is integer division, so Entropy was floor(1e6/U) --
+	// exactly 1 for half of all draws, and never less than 1.  Against a
+	// strict <, that made the acceptance probability 1/(floor(e^(dE/KT))+1)
+	// rather than e^(-dE/KT): a factor of two too cold at dE = 0, and wrong
+	// for every move up to dE = KT*ln2, which is most of what a Metropolis
+	// walk near a minimum actually proposes.  Downhill moves were unaffected,
+	// so the bias was invisible in the energies and showed up only as a
+	// search that was greedier than the temperature claimed.
 }
 
 double protein::boltzmannProbabilityToEnergy(double Pi, double Pj) //calculate boltzmann Energy from a probability (Pi) compared to a reference (Pj) probability to determine acceptance criteria
@@ -5023,3 +5055,35 @@ double protein::getHammingDistance(vector<string>seq1,vector<string>seq2)
 }  
 
 
+
+// Take a copy of every atom position.  The minimiser accepts uphill moves, so
+// the conformation it ends on is not in general the best one it found; without
+// a snapshot a pass can and does finish worse than it started.  Coordinates are
+// the right thing to keep rather than dihedrals: getChi and the energy both read
+// them, they capture backbone and cofactor moves as well as sidechain ones, and
+// they do not depend on the mutation buffers undoState works through.
+void protein::snapshotConformationCU(vector<double>& _x, vector<double>& _y,
+                                     vector<double>& _z)
+{
+	updateDeviceCoords();
+	_x = itsCoordX; _y = itsCoordY; _z = itsCoordZ;
+}
+
+// Put a snapshot back, in the object graph and on the device.  The bonding tree
+// is untouched by this -- only positions move -- so every dihedral accessor
+// keeps working and reports the angles the snapshot was taken at.
+void protein::restoreConformationCU(const vector<double>& _x, const vector<double>& _y,
+                                    const vector<double>& _z)
+{
+	buildAtomIndex();
+	const int n = (int)itsAtomPtrs.size();
+	if ((int)_x.size() < n) {return;}
+	for (int i = 0; i < n; i++)
+	{	itsAtomPtrs[i]->setCoords(_x[i], _y[i], _z[i]); }
+	updateDeviceCoords();
+	if (itsEnergyContext)
+	{	energySetCoords(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0]);
+		// The torsion baseline describes the conformation we just walked away
+		// from, and a coordinate upload does not clear it.
+		energyInvalidateTorsionBaseline(itsEnergyContext); }
+}
