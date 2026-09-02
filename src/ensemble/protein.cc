@@ -1979,10 +1979,19 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	// matter can be filled directly.  Seeding all of them from the entry
 	// geometry instead is several megabytes of memcpy per batch to supply
 	// values that are, by construction, unchanged.
+	// Zeroing them was costing 1.7 ms a trial on 1ake -- 6 MB of stores per
+	// trial to initialise values that are never read -- and the allocation
+	// itself recurred for a size that never changes.  Every entry the
+	// consumers touch (the moved residue for the thaw builder, the thaw set
+	// for the batch delta) is written below before either runs, so the buffer
+	// only needs to be large enough, not clean.
 	vector < vector < vector <double> > > confs(_numCandidates);
-	vector <double> bx((size_t)_numCandidates * N, 0.0),
-	                by((size_t)_numCandidates * N, 0.0),
-	                bz((size_t)_numCandidates * N, 0.0);
+	const size_t bneed = (size_t)_numCandidates * N;
+	if (itsBatchX.size() < bneed)
+	{	itsBatchX.resize(bneed); itsBatchY.resize(bneed); itsBatchZ.resize(bneed); }
+	vector<double>& bx = itsBatchX;
+	vector<double>& by = itsBatchY;
+	vector<double>& bz = itsBatchZ;
 	const double _p1 = g_deltaProfOn ? profNow() : 0.0;
 	for (UInt k = 0; k < _numCandidates; k++)
 	{

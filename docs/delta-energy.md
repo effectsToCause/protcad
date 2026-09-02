@@ -318,3 +318,34 @@ volume, and the per-trial `3 * K * N` zeroed allocation in
 `bestSidechainCandidateDeltaCU`, which is still worth ~1.7 ms on 1ake. The
 kernels themselves remain latency-bound and the device is still not close to
 saturated.
+
+## The zeroed allocation was a mismeasurement
+
+The note above listed the per-trial `3 * K * N` zeroed allocation in
+`bestSidechainCandidateDeltaCU` as worth about 1.7 ms on 1ake. It is not. It is
+worth roughly 30-80 us, and the 1.7 ms came from reading a microbenchmark as if
+it were the real loop.
+
+`hostMoveProbe` timed the host move path with the energy evaluation removed. In
+that setting the 6 MB buffers are allocated and freed with nothing in between,
+which on glibc means an mmap and munmap per iteration and a page fault on every
+page of the zeroing. In the real loop the same block is recycled and the memset
+lands on pages that are already resident, so almost all of the measured cost was
+an artifact of the isolation.
+
+The buffers are still worth holding across trials, just not for the stated
+reason. The consumers read only the moved residue (the thaw builder, via its
+`_support` argument) and the thaw set (the batch delta), and both are written in
+full every trial before either runs, so the buffer needs to be large enough
+rather than clean. Reusing it removes a recurring multi-megabyte allocation and
+6 MB of pointless stores per trial. Measured: 2.72 -> 2.68 s over 512 trials on
+1ake, descent trajectories unchanged.
+
+The general lesson is the one this session keeps re-learning. Every estimate
+here that came from a component measured in isolation -- the host transforms,
+the intermediate gather buffer, this allocation -- has been wrong about its
+share of the real loop, and the one phase nobody instrumented at all turned out
+to be the largest. Profile in place, or do not profile.
+
+Current per-trial shape on 1ake: batch delta 57%, `energyComputeDelta` for the
+pre-move part 12%, thaw set construction 10%, setup 7%, candidate generation 6%.

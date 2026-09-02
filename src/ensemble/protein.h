@@ -481,6 +481,12 @@ private:
 	std::vector<atom*> itsAtomPtrs;
 	void buildAtomIndex();
 	std::vector<int> itsThawList;   // atoms the last move thawed, ascending
+	// Per-trial candidate coordinate scratch, addressed k * N + atom because
+	// that is the layout both the thaw builder and the batch delta read.  Held
+	// across trials rather than rebuilt: only the moved residue and the thaw
+	// set are ever read out of these, and both are written in full every trial,
+	// so anything left over from the previous trial is unreachable.
+	std::vector<double> itsBatchX, itsBatchY, itsBatchZ;
 	std::vector<int> itsRotGroupFirst, itsRotGroupCount;   // per residue, walk order
 	std::vector< std::vector<int> > itsResRotIndex;        // [chain][resInChain] -> walk index
 	double E;
