@@ -258,3 +258,63 @@ next rung is fusing the reduction into `kGatherTermsBatch` so the intermediate
 is never materialised. Duty cycle is still about 27%, and the kernels themselves
 are latency-bound: 12x the atoms costs 1.7x the `kEnergy` time, so the device is
 not close to saturated at any size in this corpus.
+
+## Following the profile down: the torsion half
+
+The device reduction left `energyComputeBatchDelta` at 68% of a trial against
+about 450 us of kernel time, so the obvious next move was to fuse the gather
+into the reduction and stop materialising `7 * count * nCand` elements only to
+read them straight back. That was done, and it is a wash: 1683 vs 1676 us per
+trial on 1crn. It removes a buffer, an allocation and a launch, so it stays,
+but the intermediate write was not the cost either.
+
+Two wrong guesses in a row is a sign to stop guessing, so the inside of the
+call got its own sync'd phase timers (`PROTCAD_PROFILE=1`). The first run
+accounted for only 564 us of the 1152 us the caller measured, and the missing
+half was the one phase with no timer on it -- the torsion term, which earlier
+notes had written off as separate and cheap. With the mark added:
+
+| phase (1crn / 1ake, us/call) | before | after |
+|------------------------------|--------|-------|
+| stage fill (host)            | 15 / 60    | 15 / 61   |
+| stage H2D + scatter          | 181 / 351  | 181 / 353 |
+| tile bounds                  | 12 / 21    | 12 / 21   |
+| occupancy                    | 53 / 346   | 53 / 349  |
+| energy                       | 257 / 1082 | 258 / 1088|
+| reduce + D2H                 | 45 / 48    | 45 / 49   |
+| **torsion**                  | **597 / 3744** | **67 / 239** |
+
+`torsionBatchDelta` gave every candidate a full copy of the primed per-torsion
+energies, overwrote the entries the move touched, and Kahan-summed over every
+torsion in the structure -- `nCand * nTor` host adds per trial behind an
+`nL * nCand` readback.
+
+The full ascending sum is not the mistake. It is what keeps the delta
+bit-comparable to a full evaluation instead of a drifting running total, and
+replacing it with base-plus-correction would trade that away for arithmetic
+that is only cheap because it ignores cancellation. The mistake was doing it on
+the host, once per candidate. The primed baseline is now broadcast into the
+candidate rows on the device, the listed torsions overwrite it exactly as
+before, and the ascending sum runs there under the same determinism rule as the
+nonbonded half: order fixed by torsion index alone, so a candidate's total does
+not depend on its batch or on how many torsions the move touched.
+`PROTCAD_TORSION_HOSTREDUCE=1` restores the host path, and the two produce
+identical descent trajectories.
+
+Per trial across the three changes:
+
+| structure | host reduce | + device reduce | + fused | + device torsion |
+|-----------|-------------|-----------------|---------|------------------|
+| 1crn      | 2317 us     | 1676            | 1683    | **1197**  (1.94x) |
+| 1ubq      | 3666 us     | 2639            | 2708    | **1830**  (2.00x) |
+| 1ake      | 8286 us     | 7057            | 7355    | **3887**  (2.13x) |
+
+The shape of the profile has changed, which matters more than the factor. The
+batch delta is now 54-57% of a trial and `kEnergy` is the largest line in it at
+41-50%, so what remains is mostly work the GPU is actually there to do. The
+next candidates are the H2D staging and scatter, which is flat at ~180 us on
+1crn regardless of size and so is launch and transfer latency rather than
+volume, and the per-trial `3 * K * N` zeroed allocation in
+`bestSidechainCandidateDeltaCU`, which is still worth ~1.7 ms on 1ake. The
+kernels themselves remain latency-bound and the device is still not close to
+saturated.

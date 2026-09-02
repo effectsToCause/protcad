@@ -193,6 +193,9 @@ struct energyContext
     ereal *d_bterms2;
     ereal *d_bstage, *d_bgather, *d_btgat;
     size_t bdStageCap, bdGatherCap, btgatCap;
+    ereal  *d_torBase;        // primed per-torsion energies, device copy
+    double *d_torPart;        // one torsion total per candidate
+    size_t torBaseCap, torPartCap;
     // Per-candidate reduced part, so the changed set is summed on the device
     // rather than shipped home one atom at a time.
     double *d_bpart;
@@ -1378,6 +1381,8 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
     ctx->d_bdpart = ctx->d_bterms2 = ctx->d_bstage = ctx->d_bgather = 0;
+    ctx->d_torBase = 0; ctx->d_torPart = 0;
+    ctx->torBaseCap = ctx->torPartCap = 0;
     ctx->d_bpart = 0; ctx->bdPartCap = 0;
     ctx->d_btgat = 0;
     ctx->bdSplitCap = ctx->bdCandCap = 0;
@@ -1571,6 +1576,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_atoms, ctx->d_eVdw2, ctx->d_eEle2, ctx->d_gather,
         ctx->d_dpart, ctx->d_stage, ctx->d_torSub,
         ctx->d_bdpart, ctx->d_bterms2, ctx->d_bstage, ctx->d_bgather, ctx->d_bpart,
+        ctx->d_torBase, ctx->d_torPart,
         ctx->d_btgat
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
@@ -2038,6 +2044,65 @@ __global__ void kGatherTorBatch(int nList, int nCand, int nTor,
 // primed cache with its own listed values substituted in -- the same identity
 // torsionDelta uses, so a batched total is bit-identical to the single-move one
 // for the same conformation.
+// The batch torsion total used to be finished on the host: every candidate got
+// a full copy of the primed per-torsion energies, had its changed entries
+// overwritten, and was then Kahan-summed over every torsion in the structure.
+// That is O(nCand * nTor) of host arithmetic per trial behind an nL * nCand
+// readback, and it made the torsion half 51% of the batch delta on 1crn and
+// 66% on 1ake -- the part of this path that had been assumed cheap and never
+// measured.
+//
+// The full ascending sum is not the mistake; it is what makes the delta
+// bit-comparable to a full evaluation instead of a drifting running total, and
+// dropping it for a base-plus-correction would trade that away for arithmetic
+// that is only cheap because it is wrong about cancellation.  The mistake is
+// doing it on the host, once per candidate.  So the primed baseline is
+// broadcast into the candidate rows on the device, the listed torsions
+// overwrite it exactly as before, and the ascending sum happens there.
+//
+// Summation order is fixed by torsion index alone -- contiguous per-thread
+// ranges, in-order Kahan within a thread and across threads -- so a
+// candidate's torsion total does not depend on the batch it shared or on how
+// many torsions the move touched, which is the same guarantee the nonbonded
+// half carries.
+__global__ void kBroadcastTorBase(int nTor, int nCand,
+                                  const ereal* __restrict__ base,
+                                  ereal* __restrict__ rows)
+{
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int k = blockIdx.y;
+    if (t >= nTor || k >= nCand) return;
+    rows[(size_t)k * nTor + t] = base[t];
+}
+
+__global__ void kReduceTorRows(int nTor, const ereal* __restrict__ rows,
+                               double* __restrict__ out)
+{
+    const int k = blockIdx.x;
+    const ereal* r = rows + (size_t)k * nTor;
+    __shared__ double part[256];
+    const int nt = blockDim.x, tid = threadIdx.x;
+    const int chunk = (nTor + nt - 1) / nt;
+    const int lo = tid * chunk;
+    int hi = lo + chunk; if (hi > nTor) hi = nTor;
+
+    double sum = 0.0, c = 0.0;
+    for (int t = lo; t < hi; ++t) {
+        const double y = double(r[t]) - c, tt = sum + y;
+        c = (tt - sum) - y; sum = tt;
+    }
+    part[tid] = (lo < nTor) ? sum : 0.0;
+    __syncthreads();
+    if (tid == 0) {
+        double sv = 0.0, cc = 0.0;
+        for (int i = 0; i < nt; ++i) {
+            const double y = part[i] - cc, tt = sv + y;
+            cc = (tt - sv) - y; sv = tt;
+        }
+        out[k] = sv;
+    }
+}
+
 static int torsionBatchDelta(energyContext* ctx, int nCand, const int* atoms,
                              int count, bool rebuildList, double* tot)
 {
@@ -2061,6 +2126,53 @@ static int torsionBatchDelta(energyContext* ctx, int nCand, const int* atoms,
         }
         ctx->torCap = nCand;
         ctx->h_torE.resize((size_t)nTor * nCand);
+    }
+
+    static const bool torHostReduce = (getenv("PROTCAD_TORSION_HOSTREDUCE") != 0);
+
+    if (!torHostReduce) {
+        // Baseline is refreshed every call: the single-move delta writes
+        // accepted torsions straight into h_torE, so the host copy is the only
+        // authority on what "unchanged" currently means.
+        if (!ctx->d_torBase || ctx->torBaseCap < (size_t)nTor) {
+            if (ctx->d_torBase) cudaFree(ctx->d_torBase);
+            ctx->d_torBase = 0; ctx->torBaseCap = 0;
+            if (!devAlloc(&ctx->d_torBase, (size_t)nTor)) {
+                setError(ctx, "torsionBatchDelta", "out of memory for torsion base",
+                         __FILE__, __LINE__);
+                return -1;
+            }
+            ctx->torBaseCap = (size_t)nTor;
+        }
+        if (!ctx->d_torPart || ctx->torPartCap < (size_t)nCand) {
+            if (ctx->d_torPart) cudaFree(ctx->d_torPart);
+            ctx->d_torPart = 0; ctx->torPartCap = 0;
+            if (!devAlloc(&ctx->d_torPart, (size_t)nCand)) {
+                setError(ctx, "torsionBatchDelta", "out of memory for torsion totals",
+                         __FILE__, __LINE__);
+                return -1;
+            }
+            ctx->torPartCap = (size_t)nCand;
+        }
+        CUDA_OK(ctx, cudaMemcpy(ctx->d_torBase, &ctx->h_torE[0],
+                                (size_t)nTor * sizeof(ereal),
+                                cudaMemcpyHostToDevice));
+        kBroadcastTorBase<<<dim3((nTor + 255) / 256, nCand), 256>>>(
+            nTor, nCand, ctx->d_torBase, ctx->d_torE);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        if (nL > 0) {
+            kTorsion<<<dim3((nL + 255) / 256, nCand), 256>>>(
+                ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->N, nCand, nTor,
+                ctx->d_torAtoms, ctx->d_torBarrier, ctx->d_torPhase, ctx->d_torPeriod,
+                ctx->d_silent, ereal(ctx->p.torsionScale), ctx->d_torE,
+                ctx->d_torList, nL);
+            CUDA_OK(ctx, cudaPeekAtLastError());
+        }
+        kReduceTorRows<<<nCand, 256>>>(nTor, ctx->d_torE, ctx->d_torPart);
+        CUDA_OK(ctx, cudaPeekAtLastError());
+        CUDA_OK(ctx, cudaMemcpy(tot, ctx->d_torPart, (size_t)nCand * sizeof(double),
+                                cudaMemcpyDeviceToHost));
+        return 0;
     }
 
     std::vector<ereal> sub((size_t)nL * nCand, ereal(0));
@@ -3294,11 +3406,31 @@ int energyComputeBatch(energyContext* ctx, int nCand,
 // alone.  A conventional strided or tree reduction would be faster and would
 // quietly make a candidate's energy depend on the batch it was evaluated in.
 // Kahan is kept at both levels, so accuracy is no worse than the host loop's.
-__global__ void kReduceBatchPart(int count, const ereal* __restrict__ gather,
-                                 double* __restrict__ out)
+// Fusing the gather into that reduction.  Once the seven per-atom values are
+// only ever consumed by the sum above, materialising them is pure cost: the
+// gather wrote 7 * count * nCand elements to global memory and the reduction
+// immediately read them back, for a quantity that collapses to one double per
+// candidate.  This kernel reads the term arrays where they already live and
+// combines each atom on the spot, so the intermediate buffer, its allocation
+// and a kernel launch all disappear.
+//
+// The summation schedule is fixed by atom index and nothing else --
+// contiguous per-thread index ranges, in-order Kahan at both levels -- which
+// is the whole point: a candidate's value depends on `count` and nothing else, not on
+// the spatial sort and not on the batch it happened to share.
+__global__ void kFusedBatchPart(int count, int nPad,
+                                const int* __restrict__ atoms,
+                                const int* __restrict__ inv,
+                                const ereal* __restrict__ eVdw,
+                                const ereal* __restrict__ eEle,
+                                const ereal* __restrict__ eVdw2,
+                                const ereal* __restrict__ eEle2,
+                                const ereal* __restrict__ eSolvP,
+                                const ereal* __restrict__ eSolvN,
+                                const ereal* __restrict__ eSolvS,
+                                double* __restrict__ out)
 {
     const int k = blockIdx.x;
-    const ereal* g = gather + (size_t)k * 7 * (size_t)count;
     __shared__ double part[256];
     const int nt = blockDim.x, tid = threadIdx.x;
     const int chunk = (count + nt - 1) / nt;
@@ -3307,12 +3439,11 @@ __global__ void kReduceBatchPart(int count, const ereal* __restrict__ gather,
 
     double sum = 0.0, c = 0.0;
     for (int i = lo; i < hi; ++i) {
-        const double v = 2.0 * (double(g[i]) + double(g[(size_t)count + i]))
-                       - double(g[(size_t)2 * count + i])
-                       - double(g[(size_t)3 * count + i])
-                       + double(g[(size_t)4 * count + i])
-                       + double(g[(size_t)5 * count + i])
-                       + double(g[(size_t)6 * count + i]);
+        const size_t s = (size_t)k * nPad + inv[atoms[i]];
+        const double v = 2.0 * (double(eVdw[s]) + double(eEle[s]))
+                       - double(eVdw2[s]) - double(eEle2[s])
+                       + double(eSolvP[s]) + double(eSolvN[s])
+                       + double(eSolvS[s]);
         const double y = v - c, t = sum + y;
         c = (t - sum) - y; sum = t;
     }
@@ -3327,6 +3458,58 @@ __global__ void kReduceBatchPart(int count, const ereal* __restrict__ gather,
         out[k] = s;
     }
 }
+
+// Sub-phase timing for the batch delta, enabled with PROTCAD_PROFILE=1.  The
+// caller-level profile only says this call dominates a trial; it cannot say
+// which half of it, and two plausible answers in a row turned out to be wrong.
+// Each mark synchronises, so the total here runs slightly above the unprofiled
+// call -- the distribution is the point, not the absolute.
+struct batchProf {
+    double stageFill, stageCopy, scatter, bounds, occ, energy, reduce, torsion;
+    long calls;
+    batchProf() : stageFill(0), stageCopy(0), scatter(0), bounds(0), occ(0),
+                  energy(0), reduce(0), torsion(0), calls(0) {}
+    ~batchProf() {
+        if (!calls || !getenv("PROTCAD_PROFILE")) return;
+        const double us = 1e6 / double(calls);
+        double tot = stageFill + stageCopy + scatter + bounds + occ + energy
+                   + reduce + torsion;
+        fprintf(stderr,
+            "  batchDelta over %ld calls, us/call:\n"
+            "    stage fill (host)  %8.1f  %5.1f %%\n"
+            "    stage H2D+scatter  %8.1f  %5.1f %%\n"
+            "    tile bounds        %8.1f  %5.1f %%\n"
+            "    occupancy          %8.1f  %5.1f %%\n"
+            "    energy             %8.1f  %5.1f %%\n"
+            "    reduce + D2H       %8.1f  %5.1f %%\n"
+            "    torsion            %8.1f  %5.1f %%\n"
+            "    sum                %8.1f\n",
+            calls,
+            stageFill * us, 100 * stageFill / tot,
+            (stageCopy + scatter) * us, 100 * (stageCopy + scatter) / tot,
+            bounds * us, 100 * bounds / tot,
+            occ * us, 100 * occ / tot,
+            energy * us, 100 * energy / tot,
+            reduce * us, 100 * reduce / tot,
+            torsion * us, 100 * torsion / tot,
+            tot * us);
+    }
+};
+static batchProf g_bp;
+static bool batchProfOn()
+{
+    static int on = -1;
+    if (on < 0) on = getenv("PROTCAD_PROFILE") ? 1 : 0;
+    return on != 0;
+}
+static double bpNow()
+{
+    cudaDeviceSynchronize();
+    struct timeval tv; gettimeofday(&tv, 0);
+    return tv.tv_sec + tv.tv_usec / 1e6;
+}
+#define BP_MARK(field) do { if (bprof) { const double _n = bpNow(); \
+    g_bp.field += _n - _bt; _bt = _n; } } while (0)
 
 int energyComputeBatchDelta(energyContext* ctx, int nCand,
                             const double* x, const double* y, const double* z,
@@ -3369,6 +3552,10 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
         CUDA_OK(ctx, cudaPeekAtLastError());
     }
 
+    const bool bprof = batchProfOn();
+    double _bt = bprof ? bpNow() : 0.0;
+    if (bprof) ++g_bp.calls;
+
     if (x) {
         const size_t need = (size_t)3 * count * nCand;
         if (!ctx->d_bstage || ctx->bdStageCap < need) {
@@ -3394,6 +3581,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                 s[2 * count + i] = ereal(cz[a]);
             }
         }
+        BP_MARK(stageFill);
         CUDA_OK(ctx, cudaMemcpy(ctx->d_bstage, &ctx->h_bstage[0],
                                 need * sizeof(ereal), cudaMemcpyHostToDevice));
         dim3 g((count + tb - 1) / tb, nCand);
@@ -3402,6 +3590,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                                        ctx->d_bx, ctx->d_by, ctx->d_bz,
                                        ctx->d_bsx, ctx->d_bsy, ctx->d_bsz);
         CUDA_OK(ctx, cudaPeekAtLastError());
+        BP_MARK(scatter);
     }
 
     // Bounds are per candidate; the sort itself is shared and stays exact
@@ -3412,6 +3601,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                                 ctx->d_srad, ctx->d_ssilent,
                                 ctx->d_btileLo, ctx->d_btileHi);
         CUDA_OK(ctx, cudaPeekAtLastError());
+        BP_MARK(bounds);
     }
 
     if (nList == 0) {
@@ -3459,6 +3649,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
         CUDA_OK(ctx, cudaPeekAtLastError());
         kReduceOcc<<<(int)((stride + 255) / 256), 256>>>(nCand, nPad, dSplit,
                                                          ctx->d_bdpart, ctx->d_bocc);
+        BP_MARK(occ);
         CUDA_OK(ctx, cudaPeekAtLastError());
         applyFreeze(ctx, nCand, ctx->d_bocc);
         CUDA_OK(ctx, cudaPeekAtLastError());
@@ -3483,8 +3674,13 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                                       ctx->d_bterms2, ctx->d_bterms2 + stride);
             CUDA_OK(ctx, cudaPeekAtLastError());
         }
+        BP_MARK(energy);
 
+        // Only the host reference path needs the per-atom gather materialised;
+        // the device path fuses it into the reduction below.
+        static const bool hostReduce = (getenv("PROTCAD_BATCH_HOSTREDUCE") != 0);
         const size_t need = (size_t)7 * count * nCand;
+        if (hostReduce) {
         if (!ctx->d_bgather || ctx->bdGatherCap < need) {
             if (ctx->d_bgather) cudaFree(ctx->d_bgather);
             ctx->d_bgather = 0; ctx->bdGatherCap = 0;
@@ -3504,10 +3700,10 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                                          t0 + 4 * stride, ctx->d_bgather);
             CUDA_OK(ctx, cudaPeekAtLastError());
         }
+        }
         // Reduce on the device and bring home one number per candidate.  The
         // host path is kept behind PROTCAD_BATCH_HOSTREDUCE because it is the
         // reference the device schedule was validated against.
-        static const bool hostReduce = (getenv("PROTCAD_BATCH_HOSTREDUCE") != 0);
         if (hostReduce) {
             ctx->h_bgather.resize(need);
             CUDA_OK(ctx, cudaMemcpy(&ctx->h_bgather[0], ctx->d_bgather,
@@ -3545,12 +3741,17 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                 }
                 ctx->bdPartCap = (size_t)nCand;
             }
-            kReduceBatchPart<<<nCand, 256>>>(count, ctx->d_bgather, ctx->d_bpart);
+            kFusedBatchPart<<<nCand, 256>>>(count, nPad, ctx->d_atoms, ctx->d_inv,
+                                            t0, t0 + stride,
+                                            ctx->d_bterms2, ctx->d_bterms2 + stride,
+                                            t0 + 2 * stride, t0 + 3 * stride,
+                                            t0 + 4 * stride, ctx->d_bpart);
             CUDA_OK(ctx, cudaPeekAtLastError());
             CUDA_OK(ctx, cudaMemcpy(partOut, ctx->d_bpart,
                                     (size_t)nCand * sizeof(double),
                                     cudaMemcpyDeviceToHost));
         }
+        BP_MARK(reduce);
     }
 
     if (torsionOut) {
@@ -3561,6 +3762,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
             torsionTotals(ctx, ctx->d_bx, ctx->d_by, ctx->d_bz, nCand, torsionOut, 0) != 0)
             return -1;
     }
+    BP_MARK(torsion);
     return 0;
 }
 
