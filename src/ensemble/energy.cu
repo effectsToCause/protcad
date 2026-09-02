@@ -527,6 +527,26 @@ __device__ __forceinline__ int exclusionCode(
     return 0;
 }
 
+// Same test, with the three loads that depend only on i lifted out by the
+// caller.  origI is fixed for the life of a thread, so exclSpan[origI],
+// exclCount[origI] and the row base of exclList are loop invariant across the
+// entire pair loop; issuing them per pair costs a global access on every one
+// of the ~56M pairs a batch examines.  Identical arithmetic, identical result.
+__device__ __forceinline__ int exclusionCodeHoisted(
+    int origJ, int resI, int resJ, int spanI, int nI, const int* __restrict__ listI)
+{
+    int dr = resI - resJ;
+    if (dr < 0) dr = -dr;
+    if (dr > spanI) return 0;
+
+    for (int k = 0; k < nI; ++k) {
+        int e = listI[k];
+        if (e == origJ) return 1;
+        if (e == -(origJ + 1)) return 2;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Dihedrals
 // ---------------------------------------------------------------------------
@@ -972,6 +992,14 @@ __global__ void kEnergy(int nTiles,
     shellState si = shellFromOcclusion(occ[s], ri, p, v43);
     if (epsAll) si.eps = epsAll[s];
 
+    // Lift i's exclusion row out of the pair loop; see exclusionCodeHoisted.
+    // Padding lanes carry sorig == -1 and never reach the pair loop, but the
+    // hoist runs before that test, so it must not index on a negative origI.
+    const int spanI  = (origI >= 0) ? exclSpan[origI]  : -1;
+    const int nExclI = (origI >= 0) ? exclCount[origI] : 0;
+    const int* __restrict__ listI =
+        exclList + (size_t)(origI >= 0 ? origI : 0) * exclStride;
+
     const ereal cutSq   = p.cutoff * p.cutoff;
     const ereal swStart = p.switchStart * p.switchStart;
     const ereal minSep  = p.minSeparation;
@@ -1014,9 +1042,9 @@ __global__ void kEnergy(int nTiles,
                 ereal r2 = dx * dx + dy * dy + dz * dz;
                 if (r2 >= cutSq) continue;
 
-                int xcode = exclusionCode(origI, shOrig[base + k], resI,
-                                          shRes[base + k], exclSpan, exclCount,
-                                          exclList, exclStride);
+                int xcode = exclusionCodeHoisted(shOrig[base + k], resI,
+                                                 shRes[base + k], spanI,
+                                                 nExclI, listI);
                 if (xcode == 1) continue;
 
                 // 1-4 pairs survive at reduced weight.  In legacy mode both

@@ -800,3 +800,46 @@ it does, and that points at staging *instructions* and occupancy rather than at
 the pair loop -- ten separate scalar loads and a `__syncwarp` per j-tile per
 i-tile. Packing the sort-invariant attributes into wide vector loads is the
 next thing to measure, not a new traversal scheme.
+
+## Lifting i's exclusion row out of the pair loop
+
+`exclusionCode` took `origI` and indexed three things with it: `exclSpan[origI]`,
+`exclCount[origI]`, and the row base `exclList + origI*stride`. `origI` is
+`sorig[s]` -- fixed for the life of the thread. All three were being issued as
+global loads on every one of the ~56M pairs a batch delta examines.
+
+The loads look trivially hoistable, and there are no stores in the pair loop, so
+nvcc was expected to lift them. It did not. `exclusionCodeHoisted` takes the
+three values as arguments and the caller computes them once in its prologue:
+
+| | kEnergy |
+|---|---|
+| baseline | 1032.5 us |
+| + dielectric hoist | 967.0 us |
+| + exclusion hoist | 890.0 us |
+
+13.8% off kEnergy, in two changes that alter no arithmetic and no summation
+order. `batchDeltaTest` is unchanged at exactly 1.88e-06 through both, and
+`minStopBench` on 1ake reaches bit-identical results at 64 trials (37.9784) and
+512 trials (-310.4738).
+
+Padding lanes carry `sorig == -1`. The old code was safe because the call sat
+behind the `active` test; the hoist runs in the prologue ahead of it, so it
+guards on `origI >= 0` explicitly.
+
+The pattern is now the recurring one on this kernel: both wins came from work
+that was *loop-invariant and being redone*, not from work that was expensive.
+Look for redundancy before looking for cheaper physics.
+
+## minStopProbe's end energy is a random variate, not a fixed point
+
+Earlier notes treated 1crn settling at 444.344 as a reproducible value to check
+against. It is not. Three runs of the same unmodified binary give 436.228,
+437.733 and 444.959 -- the probe does not seed deterministically, so its end
+energy is a draw from a distribution several kcal wide.
+
+Only two things from `minStopProbe` are meaningful as regression evidence:
+that successive passes are **monotone**, and that the search reaches a **fixed
+point** (each pass's `start` exactly equals the previous pass's `end`). For a
+reproducible energy, use `minStopBench`, which takes an explicit seed and is
+deterministic run to run.
