@@ -180,6 +180,11 @@ struct energyContext
     ereal *d_bsx, *d_bsy, *d_bsz;
     ereal *d_bocc, *d_btileLo, *d_btileHi;
     ereal *d_bterms;
+    // Per-atom dielectric for every candidate, computed once from the settled
+    // occupancy.  kEnergy used to derive this inside its j-tile staging, which
+    // repeats the whole shell calculation once per i-tile; hoisting it here
+    // drops that redundancy without changing a single arithmetic operation.
+    ereal *d_epsAll;
 
     // Batched delta evaluation.  The batch buffers above hold the candidate
     // conformations; these hold what the restricted sum needs on top of them --
@@ -880,6 +885,25 @@ __global__ void kOccupancy(int nTiles,
 // Pass 2: pair energies plus per-atom solvation
 // ---------------------------------------------------------------------------
 
+// The dielectric of an atom depends only on its own radius and its settled
+// occupancy, so it is the same for every i-tile that stages that atom as a
+// neighbour.  kEnergy's staging recomputed it once per i-tile -- on 1ake that
+// is a factor of nList, with three divides and a truncation each time.  This
+// evaluates it once per (candidate, atom) and kEnergy reads the result.  Same
+// function, same inputs, so the values are bit-identical to the inline form.
+__global__ void kPrecomputeEps(int nPad, int nCand,
+                               const ereal* __restrict__ occ,
+                               const ereal* __restrict__ srad,
+                               energyParams p, ereal v43,
+                               ereal* __restrict__ epsAll)
+{
+    const size_t total = (size_t)nCand * nPad;
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    const int s = (int)(idx % (size_t)nPad);   // candidates share one sort
+    epsAll[idx] = shellFromOcclusion(occ[idx], srad[s], p, v43).eps;
+}
+
 __global__ void kEnergy(int nTiles,
                         const ereal* __restrict__ sx,
                         const ereal* __restrict__ sy,
@@ -902,7 +926,8 @@ __global__ void kEnergy(int nTiles,
                         ereal* __restrict__ eSolvS,
                         const int* __restrict__ iTileList, int nList,
                         const unsigned char* __restrict__ cmask,
-                        ereal* __restrict__ eVdw2, ereal* __restrict__ eEle2)
+                        ereal* __restrict__ eVdw2, ereal* __restrict__ eEle2,
+                        const ereal* __restrict__ epsAll)
 {
     // blockIdx.z partitions the j-tile loop. Each chunk accumulates the pair
     // terms for its own stride of j into a separate slice, and a following
@@ -919,6 +944,7 @@ __global__ void kEnergy(int nTiles,
         if (eVdw2) eVdw2 += ((size_t)chunk * nCand + k) * nPad;
         if (eEle2) eEle2 += ((size_t)chunk * nCand + k) * nPad;
         eSolvP += k * nPad; eSolvN += k * nPad; eSolvS += k * nPad;
+        if (epsAll) epsAll += k * nPad;
     }
     __shared__ ereal shX[BLOCK], shY[BLOCK], shZ[BLOCK];
     __shared__ ereal shR[BLOCK], shE[BLOCK], shQ[BLOCK], shD[BLOCK];
@@ -943,7 +969,8 @@ __global__ void kEnergy(int nTiles,
 
     // The dielectric of i is a property of i alone, so compute it once here
     // rather than twice inside every pair as the original did.
-    const shellState si = shellFromOcclusion(occ[s], ri, p, v43);
+    shellState si = shellFromOcclusion(occ[s], ri, p, v43);
+    if (epsAll) si.eps = epsAll[s];
 
     const ereal cutSq   = p.cutoff * p.cutoff;
     const ereal swStart = p.switchStart * p.switchStart;
@@ -966,7 +993,9 @@ __global__ void kEnergy(int nTiles,
         int js = jTile * TILE + lane;
         shX[base + lane] = sx[js]; shY[base + lane] = sy[js]; shZ[base + lane] = sz[js];
         shR[base + lane] = srad[js]; shE[base + lane] = ssqrtEps[js];
-        shQ[base + lane] = schg[js]; shD[base + lane] = shellFromOcclusion(occ[js], srad[js], p, v43).eps;
+        shQ[base + lane] = schg[js];
+        shD[base + lane] = epsAll ? epsAll[js]
+                                  : shellFromOcclusion(occ[js], srad[js], p, v43).eps;
         shRes[base + lane] = sresIndex[js]; shOrig[base + lane] = sorig[js];
         shC[base + lane] = cmask ? cmask[js] : (unsigned char)0;
         if (ssilent[js]) shX[base + lane] = ereal(1e9);
@@ -1382,6 +1411,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
+    ctx->d_epsAll = 0;
     ctx->d_bdpart = ctx->d_bterms2 = ctx->d_bstage = ctx->d_bgather = 0;
     ctx->d_moved = 0; ctx->movedCap = 0;
     ctx->d_torBase = 0; ctx->d_torPart = 0;
@@ -1568,6 +1598,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_xSave, ctx->d_ySave, ctx->d_zSave, ctx->d_bounds,
         ctx->d_bx, ctx->d_by, ctx->d_bz, ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
         ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
+        ctx->d_epsAll,
         ctx->d_part,
         ctx->d_torAtoms, ctx->d_torBarrier, ctx->d_torPhase, ctx->d_torPeriod,
         ctx->d_torE,
@@ -2737,7 +2768,7 @@ int energyComputeDelta(energyContext* ctx,
             ctx->d_dpart, ctx->d_dpart + blk,
             ctx->d_eSolvP, ctx->d_eSolvN, ctx->d_eSolvS,
             ctx->d_tileList, nList, ctx->d_cmask,
-            ctx->d_dpart + 2 * blk, ctx->d_dpart + 3 * blk);
+            ctx->d_dpart + 2 * blk, ctx->d_dpart + 3 * blk, 0);
         CUDA_OK(ctx, cudaPeekAtLastError());
         {
             const int rb = (int)((nPad + 255) / 256);
@@ -2853,7 +2884,7 @@ static int energyComputeImpl(energyContext* ctx,
                                ctx->d_part,
                                ctx->d_part + (size_t)jSplit * nPad,
                                ctx->d_eSolvP,
-                               ctx->d_eSolvN, ctx->d_eSolvS, 0, 0, 0, 0, 0);
+                               ctx->d_eSolvN, ctx->d_eSolvS, 0, 0, 0, 0, 0, 0);
     CUDA_OK(ctx, cudaPeekAtLastError());
     {
         int rb = (int)((nPad + 255) / 256);
@@ -3132,12 +3163,14 @@ static bool ensureBatch(energyContext* ctx, int nCand)
 
     void* old[] = { ctx->d_bx, ctx->d_by, ctx->d_bz,
                     ctx->d_bsx, ctx->d_bsy, ctx->d_bsz,
-                    ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms };
+                    ctx->d_bocc, ctx->d_btileLo, ctx->d_btileHi, ctx->d_bterms,
+                    ctx->d_epsAll };
     for (size_t i = 0; i < sizeof(old) / sizeof(old[0]); ++i)
         if (old[i]) cudaFree(old[i]);
     ctx->d_bx = ctx->d_by = ctx->d_bz = 0;
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
+    ctx->d_epsAll = 0;
     ctx->batchCap = 0;
 
     const size_t K = (size_t)nCand, N = ctx->N, nPad = ctx->nPad, nT = ctx->nTiles;
@@ -3147,6 +3180,7 @@ static bool ensureBatch(energyContext* ctx, int nCand)
     ok &= devAlloc(&ctx->d_bsx, K * nPad) && devAlloc(&ctx->d_bsy, K * nPad)
        && devAlloc(&ctx->d_bsz, K * nPad);
     ok &= devAlloc(&ctx->d_bocc, K * nPad);
+    ok &= devAlloc(&ctx->d_epsAll, K * nPad);
     ok &= devAlloc(&ctx->d_btileLo, K * nT * 3) && devAlloc(&ctx->d_btileHi, K * nT * 3);
     ok &= devAlloc(&ctx->d_bterms, K * nPad * 5);
     if (!ok) return false;
@@ -3263,6 +3297,12 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
         CUDA_OK(ctx, cudaPeekAtLastError());
         applyFreeze(ctx, nCand, ctx->d_bocc);
         CUDA_OK(ctx, cudaPeekAtLastError());
+        {
+            const size_t tot = (size_t)nCand * nPad;
+            kPrecomputeEps<<<(int)((tot + 255) / 256), 256>>>(
+                nPad, nCand, ctx->d_bocc, ctx->d_srad, ctx->p, v43, ctx->d_epsAll);
+            CUDA_OK(ctx, cudaPeekAtLastError());
+        }
     }
 
     double tOcc = prof ? (cudaDeviceSynchronize(), profWall()) : 0.0;
@@ -3285,7 +3325,7 @@ static int evalBatch(energyContext* ctx, int nCand, double* totals)
                               ctx->d_part,
                               ctx->d_part + (size_t)jSplit * stride,
                               t0 + 2 * stride, t0 + 3 * stride, t0 + 4 * stride,
-                              0, 0, 0, 0, 0);
+                              0, 0, 0, 0, 0, ctx->d_epsAll);
     CUDA_OK(ctx, cudaPeekAtLastError());
 
     {
@@ -3697,6 +3737,12 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
         CUDA_OK(ctx, cudaPeekAtLastError());
         applyFreeze(ctx, nCand, ctx->d_bocc);
         CUDA_OK(ctx, cudaPeekAtLastError());
+        {
+            const size_t tot = (size_t)nCand * nPad;
+            kPrecomputeEps<<<(int)((tot + 255) / 256), 256>>>(
+                nPad, nCand, ctx->d_bocc, ctx->d_srad, ctx->p, v43, ctx->d_epsAll);
+            CUDA_OK(ctx, cudaPeekAtLastError());
+        }
 
         ereal* t0 = ctx->d_bterms;
         kEnergy<<<dim3(blocks, nCand, dSplit), BLOCK>>>(
@@ -3708,7 +3754,7 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
             ctx->d_bdpart, ctx->d_bdpart + blk,
             t0 + 2 * stride, t0 + 3 * stride, t0 + 4 * stride,
             ctx->d_tileList, nList, ctx->d_cmask,
-            ctx->d_bdpart + 2 * blk, ctx->d_bdpart + 3 * blk);
+            ctx->d_bdpart + 2 * blk, ctx->d_bdpart + 3 * blk, ctx->d_epsAll);
         CUDA_OK(ctx, cudaPeekAtLastError());
         {
             const int rb = (int)((stride + 255) / 256);

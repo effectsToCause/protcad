@@ -743,3 +743,60 @@ storing the j-side cmask bit in the list entry.
 
 This has not been built.  It is the largest remaining lever in the delta path
 and it is a real kernel redesign, not a tuning change.
+
+## Hoisting the dielectric out of tile staging
+
+The ablation in the previous section measured where kEnergy's time goes by
+switching off arithmetic *inside the pair loop*. It missed something. The
+j-side dielectric is not computed in the pair loop; it is computed in the
+**staging** loop, once per neighbour atom per i-tile:
+
+    shD[base + lane] = shellFromOcclusion(occ[js], srad[js], p, v43).eps;
+
+`shellFromOcclusion` carries two cubes, three divides and a truncation. An
+atom's dielectric depends only on its own radius and its settled occupancy, so
+this produces the same number for every i-tile that stages it as a neighbour.
+On 1ake that is `nList` = ~37 recomputations of an identical value.
+
+`kPrecomputeEps` now evaluates it once per (candidate, atom) after the
+occupancy settles, and kEnergy reads `epsAll[js]` instead. Same function, same
+inputs, same order, so the result is bit-identical -- `batchDeltaTest` stayed at
+exactly 1.88e-06, unchanged to every digit.
+
+Measured on 1ake, 64 trials, best of three:
+
+| | before | after |
+|---|---|---|
+| kEnergy | 1032.5 us | 967.0 us |
+| batch delta | 1877 us | 1811 us |
+| per trial | 2201.9 us | 2127 us |
+
+Kept, but read the size honestly. Removing a 37x redundant block of divides
+bought **6.3%**. That is the useful finding: kEnergy is not ALU-bound. Roughly
+300 lane-cycles are being spent per examined pair, which is two orders of
+magnitude more than the reject path's arithmetic can account for. Whatever the
+kernel is waiting on, it is not the physics.
+
+### What this does to the pair-list plan
+
+It argues against it, and the pair counts already collected say the same thing
+once they are converted to bytes.
+
+The current staging moves 32 neighbours x 10 arrays x 4 B = 1280 B into shared
+memory and 32 i-lanes each consume all 32 of them: **1.25 B per examined pair**,
+or ~8.6 B per *surviving* pair at the measured 14.5% survival. The whole sorted
+attribute set is ~313 KB and fits in L2, so almost none of that reaches DRAM.
+
+A compacted pair list costs ~12 B per surviving entry, and then needs a
+**random** gather of the j-side dielectric per entry, which is uncoalesced and
+pulls a 32 B sector for every 4 B used. It replaces ~8.6 B of L2-resident,
+perfectly coalesced, broadcast-shared traffic with ~12 B of streamed traffic
+plus a scattered gather. On bandwidth it is a downgrade, and the eps hoist just
+demonstrated that the arithmetic it would save is not what we are paying for.
+
+So the pair list is withdrawn as designed. The tile structure is not the
+problem; it is a good structure. The open question is why a tile pair costs what
+it does, and that points at staging *instructions* and occupancy rather than at
+the pair loop -- ten separate scalar loads and a `__syncwarp` per j-tile per
+i-tile. Packing the sort-invariant attributes into wide vector loads is the
+next thing to measure, not a new traversal scheme.
