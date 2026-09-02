@@ -287,6 +287,12 @@ public:
 	                                     double& _torBest,
 	                                     std::vector<double>* _allEnergies = 0,
 	                                     std::vector < std::vector < std::vector <double> > >* _allConfs = 0);
+	// Minimiser delta chain.  minDeltaAnchorCU pays for one coupled evaluation
+	// and a fresh snapshot; minDeltaCommitCU carries an accepted move forward
+	// without one.  Both return false if the chain cannot be maintained, and
+	// the caller must then fall back to full evaluations.
+	bool minDeltaAnchorCU(double& _nbCurrent, double& _total);
+	bool minDeltaCommitCU(double _nbBest, double& _nbCurrent);
 	void updateResidueEnergiesCU();
 	void updateResidueClashesCU();
 	UInt getNumHardBackboneClashesCU();

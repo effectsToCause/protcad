@@ -2817,6 +2817,34 @@ void protein::protRelaxCU(UIntVec _frozenResidues, UIntVec _activeChains)
 	return;
 }
 
+bool protein::minDeltaAnchorCU(double& _nbCurrent, double& _total)
+{
+	// The anchor is a coupled evaluation, not a frozen one: the chain's whole
+	// error budget is referenced to it, so it must not itself be approximate.
+	// Splitting off torsion lets the delta replace that term wholesale rather
+	// than difference it, and priming the per-torsion cache is a side effect
+	// the delta depends on.
+	protReleaseDielectricCU();
+	energyBreakdown b;
+	if (!protEnergyBreakdownCU(b)) {return false;}
+	_total = b.total;
+	_nbCurrent = b.total - b.torsion;
+	return protFreezeDielectricCU();
+}
+
+bool protein::minDeltaCommitCU(double _nbBest, double& _nbCurrent)
+{
+	// The batch left the device at the entry geometry and its occupancy with
+	// it.  One single-candidate delta at the winner brings the resident field
+	// to the accepted conformation -- a thirty-second of the batch, over the
+	// same thaw set -- and the snapshot then follows from it directly.
+	double part = 0.0, tor = 0.0;
+	if (protEnergyDeltaCU(part, tor) != 0) {return false;}
+	if (!protRefreezeDielectricCU()) {return false;}
+	_nbCurrent = _nbBest;
+	return true;
+}
+
 void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains, UInt _plateau)
 {
 	// Sidechain and backslide optimization with a local dielectric scaling of electrostatics and corresponding Born/Gill implicit solvation energy
@@ -2835,6 +2863,18 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
 	bool sidechainTest, backboneTest, revert, cofactorTest, energyTest, skip, boltzmannAcceptance;
 	vector <dblVec> currentCoords;
+	// Delta chain.  Sidechain candidate batches are evaluated against a held
+	// dielectric instead of from scratch, which is where nearly all of this
+	// loop's time goes.  The chain is re-anchored periodically because the
+	// identity accumulates rounding over thousands of accepted moves, and it is
+	// abandoned entirely on a backbone move, which perturbs the whole structure
+	// and invalidates the snapshot.
+	static const bool deltaMin = (getenv("PROTCAD_MIN_NO_DELTA") == 0);
+	static const bool deltaDebug = (getenv("PROTCAD_MIN_DEBUG") != 0);
+	const int ANCHOR_EVERY = 64;
+	bool anchored = false, havePending = false;
+	double nbCurrent = 0.0, pendingNb = 0.0, worstDrift = 0.0;
+	int sinceAnchor = 0;
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -2878,6 +2918,9 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 			//--Backbone conformation trial--------------------------------------------------------
 			if (_backbone) {backboneOrSidechain = rand() % 2;}
 			if (randres > 0 && randres < resnum-2 && backboneOrSidechain == 0){
+				// A backbone move displaces everything downstream of it, so the
+				// held field is no longer the structure's and the chain ends here.
+				if (anchored) {protReleaseDielectricCU(); anchored = false;}
 				backboneTest = true;
 				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
 				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
@@ -2892,7 +2935,48 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 				// returns the winner's energy, so no separate evaluation follows.
 				sidechainTest = true;
 				currentSidechainConf = getSidechainDihedrals(randchain, randres);
-				trialEnergy = bestSidechainCandidateCU(randchain, randres, SIDECHAIN_CANDIDATES, newSidechainConf);
+				havePending = false; trialEnergy = 1E30;
+				if (deltaMin)
+				{
+					if (!anchored || sinceAnchor >= ANCHOR_EVERY)
+					{
+						double fresh = 0.0;
+						const bool wasAnchored = anchored;
+						if (minDeltaAnchorCU(nbCurrent, fresh))
+						{
+							// The gap between the carried energy and a fresh
+							// coupled one is the chain's accumulated error, and
+							// it is the only thing here that can go wrong
+							// silently, so it is measured rather than assumed.
+							if (wasAnchored)
+							{
+								const double drift = fabs(fresh - pastEnergy);
+								if (drift > worstDrift) {worstDrift = drift;}
+								if (deltaDebug)
+								{	cout << "protMinCU: re-anchor drift " << drift
+									     << " over " << sinceAnchor << " moves" << endl; }
+							}
+							pastEnergy = fresh;
+							anchored = true; sinceAnchor = 0;
+						}
+						else {protReleaseDielectricCU(); anchored = false;}
+					}
+					if (anchored)
+					{
+						double nbBest = 0.0, torBest = 0.0;
+						trialEnergy = bestSidechainCandidateDeltaCU(randchain, randres,
+						                                            SIDECHAIN_CANDIDATES,
+						                                            newSidechainConf,
+						                                            nbCurrent, nbBest, torBest);
+						if (trialEnergy < 1E29) {pendingNb = nbBest; havePending = true;}
+						else {protReleaseDielectricCU(); anchored = false;}
+					}
+				}
+				if (!havePending)
+				{
+					if (anchored) {protReleaseDielectricCU(); anchored = false;}
+					trialEnergy = bestSidechainCandidateCU(randchain, randres, SIDECHAIN_CANDIDATES, newSidechainConf);
+				}
 				if (trialEnergy < 1E29)
 				{
 					setSidechainDihedralAngles(randchain, randres, newSidechainConf);
@@ -2907,6 +2991,11 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
 			if (boltzmannAcceptance){
 				pastEnergy = Energy;
+				if (havePending)
+				{
+					if (minDeltaCommitCU(pendingNb, nbCurrent)) {sinceAnchor++;}
+					else {protReleaseDielectricCU(); anchored = false;}
+				}
 				if (deltaEnergy < -KT){nobetter = 0;}
 			}
 			else{revert = true;}
@@ -2926,6 +3015,14 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 			}
 		}
 	} while (nobetter < plateau);
+	// A rejected move leaves the device at the entry geometry, so the chain
+	// survives it untouched; only the exit has to put the coupled model back.
+	if (anchored)
+	{
+		protReleaseDielectricCU();
+		if (deltaDebug)
+		{	cout << "protMinCU: worst re-anchor drift " << worstDrift << endl; }
+	}
 	return;
 }
 
@@ -2947,6 +3044,18 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 	vector < DouVec > currentSidechainConf, newSidechainConf; srand (time(NULL)); vector <double> backboneAngles(2);
 	bool sidechainTest, backboneTest, revert, cofactorTest, energyTest, boltzmannAcceptance;
 	vector <dblVec> currentCoords;
+	// Delta chain.  Sidechain candidate batches are evaluated against a held
+	// dielectric instead of from scratch, which is where nearly all of this
+	// loop's time goes.  The chain is re-anchored periodically because the
+	// identity accumulates rounding over thousands of accepted moves, and it is
+	// abandoned entirely on a backbone move, which perturbs the whole structure
+	// and invalidates the snapshot.
+	static const bool deltaMin = (getenv("PROTCAD_MIN_NO_DELTA") == 0);
+	static const bool deltaDebug = (getenv("PROTCAD_MIN_DEBUG") != 0);
+	const int ANCHOR_EVERY = 64;
+	bool anchored = false, havePending = false;
+	double nbCurrent = 0.0, pendingNb = 0.0, worstDrift = 0.0;
+	int sinceAnchor = 0;
 	//--Run optimizaiton loop to local minima defined by an RT plateau------------------------
 	do{
 		//--choose random residue not frozen of active chains
@@ -2983,6 +3092,9 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 			//--Backbone conformation trial--------------------------------------------------------
 			if (_backbone) {backboneOrSidechain = rand() % 2;}
 			if (randres > 0 && randres < resnum-2 && backboneOrSidechain == 0){
+				// A backbone move displaces everything downstream of it, so the
+				// held field is no longer the structure's and the chain ends here.
+				if (anchored) {protReleaseDielectricCU(); anchored = false;}
 				backboneTest = true;
 				sPhi = getPhi(randchain,randres), sPsi = getPsi(randchain,randres);
 				backboneAngles = getRandConformationFromBackboneType(sPhi, sPsi);
@@ -2997,7 +3109,48 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 				// returns the winner's energy, so no separate evaluation follows.
 				sidechainTest = true;
 				currentSidechainConf = getSidechainDihedrals(randchain, randres);
-				trialEnergy = bestSidechainCandidateCU(randchain, randres, SIDECHAIN_CANDIDATES, newSidechainConf);
+				havePending = false; trialEnergy = 1E30;
+				if (deltaMin)
+				{
+					if (!anchored || sinceAnchor >= ANCHOR_EVERY)
+					{
+						double fresh = 0.0;
+						const bool wasAnchored = anchored;
+						if (minDeltaAnchorCU(nbCurrent, fresh))
+						{
+							// The gap between the carried energy and a fresh
+							// coupled one is the chain's accumulated error, and
+							// it is the only thing here that can go wrong
+							// silently, so it is measured rather than assumed.
+							if (wasAnchored)
+							{
+								const double drift = fabs(fresh - pastEnergy);
+								if (drift > worstDrift) {worstDrift = drift;}
+								if (deltaDebug)
+								{	cout << "protMinCU: re-anchor drift " << drift
+									     << " over " << sinceAnchor << " moves" << endl; }
+							}
+							pastEnergy = fresh;
+							anchored = true; sinceAnchor = 0;
+						}
+						else {protReleaseDielectricCU(); anchored = false;}
+					}
+					if (anchored)
+					{
+						double nbBest = 0.0, torBest = 0.0;
+						trialEnergy = bestSidechainCandidateDeltaCU(randchain, randres,
+						                                            SIDECHAIN_CANDIDATES,
+						                                            newSidechainConf,
+						                                            nbCurrent, nbBest, torBest);
+						if (trialEnergy < 1E29) {pendingNb = nbBest; havePending = true;}
+						else {protReleaseDielectricCU(); anchored = false;}
+					}
+				}
+				if (!havePending)
+				{
+					if (anchored) {protReleaseDielectricCU(); anchored = false;}
+					trialEnergy = bestSidechainCandidateCU(randchain, randres, SIDECHAIN_CANDIDATES, newSidechainConf);
+				}
 				if (trialEnergy < 1E29)
 				{
 					setSidechainDihedralAngles(randchain, randres, newSidechainConf);
@@ -3012,6 +3165,11 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 			boltzmannAcceptance = boltzmannEnergyCriteria(deltaEnergy);
 			if (boltzmannAcceptance){
 				pastEnergy = Energy;
+				if (havePending)
+				{
+					if (minDeltaCommitCU(pendingNb, nbCurrent)) {sinceAnchor++;}
+					else {protReleaseDielectricCU(); anchored = false;}
+				}
 				if (deltaEnergy < -KT){nobetter = 0;}
 			}
 			else{revert = true;}
@@ -3031,6 +3189,14 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 			}
 		}
 	} while (nobetter < plateau);
+	// A rejected move leaves the device at the entry geometry, so the chain
+	// survives it untouched; only the exit has to put the coupled model back.
+	if (anchored)
+	{
+		protReleaseDielectricCU();
+		if (deltaDebug)
+		{	cout << "protMinCU: worst re-anchor drift " << worstDrift << endl; }
+	}
 	return;
 }
 
