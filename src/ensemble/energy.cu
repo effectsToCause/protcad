@@ -193,6 +193,10 @@ struct energyContext
     ereal *d_bterms2;
     ereal *d_bstage, *d_bgather, *d_btgat;
     size_t bdStageCap, bdGatherCap, btgatCap;
+    // Per-candidate reduced part, so the changed set is summed on the device
+    // rather than shipped home one atom at a time.
+    double *d_bpart;
+    size_t bdPartCap;
 
     // Per-chunk pair-term slices for the j-split energy launch, and the split
     // factor itself.  jSplit is a function of the tile count alone, never of
@@ -1374,6 +1378,7 @@ energyContext* energyCreate(const energyTopology& topo, const energyParams& para
     ctx->d_bsx = ctx->d_bsy = ctx->d_bsz = 0;
     ctx->d_bocc = ctx->d_btileLo = ctx->d_btileHi = ctx->d_bterms = 0;
     ctx->d_bdpart = ctx->d_bterms2 = ctx->d_bstage = ctx->d_bgather = 0;
+    ctx->d_bpart = 0; ctx->bdPartCap = 0;
     ctx->d_btgat = 0;
     ctx->bdSplitCap = ctx->bdCandCap = 0;
     ctx->bdStageCap = ctx->bdGatherCap = ctx->btgatCap = 0;
@@ -1565,7 +1570,7 @@ void energyDestroy(energyContext* ctx)
         ctx->d_cmask, ctx->d_tileList, ctx->d_tileCount, ctx->d_inv,
         ctx->d_atoms, ctx->d_eVdw2, ctx->d_eEle2, ctx->d_gather,
         ctx->d_dpart, ctx->d_stage, ctx->d_torSub,
-        ctx->d_bdpart, ctx->d_bterms2, ctx->d_bstage, ctx->d_bgather,
+        ctx->d_bdpart, ctx->d_bterms2, ctx->d_bstage, ctx->d_bgather, ctx->d_bpart,
         ctx->d_btgat
     };
     for (size_t i = 0; i < sizeof(ptrs) / sizeof(ptrs[0]); ++i)
@@ -3263,6 +3268,66 @@ int energyComputeBatch(energyContext* ctx, int nCand,
 // the changed atoms are uploaded, so host cost per candidate is |C| rather than
 // N -- without which the batch's own bookkeeping would eat the delta's win, as
 // it did for the single-move path before the scatter landed.
+
+// Reduce a batch's changed-set terms to one number per candidate.
+//
+// This used to be done on the host: kGatherTermsBatch wrote 7 values per
+// changed atom per candidate, all of it came home over PCIe, and the caller
+// ran a Kahan sum over 7 * count * nCand doubles.  On 1crn that is 58k
+// double-precision adds behind a 233 kB transfer for every trial, and it made
+// energyComputeBatchDelta 77% of a minimisation step while the kernels it
+// exists to run accounted for a fifth of it.  The changed set is the one thing
+// in this path whose size grows with the structure, so shipping it per atom is
+// exactly the wrong thing to move across the bus.
+//
+// The seven terms enter the total linearly -- 2*t0 + 2*t1 - t2 - t3 + t4 + t5
+// + t6 -- so there is no reason to reduce them separately or to reduce them
+// here at all: each atom's contribution collapses to one scalar and the whole
+// changed set collapses to one number per candidate.
+//
+// The host version's determinism guarantee is preserved and it is the only
+// real constraint on the schedule.  A candidate's value must not depend on the
+// spatial sort or on how many candidates share the batch, so the summation
+// order has to be fixed by atom index and nothing else.  Each thread therefore
+// takes one contiguous index range and sums it in order, and thread zero
+// combines the partials in thread order; the result is a function of `count`
+// alone.  A conventional strided or tree reduction would be faster and would
+// quietly make a candidate's energy depend on the batch it was evaluated in.
+// Kahan is kept at both levels, so accuracy is no worse than the host loop's.
+__global__ void kReduceBatchPart(int count, const ereal* __restrict__ gather,
+                                 double* __restrict__ out)
+{
+    const int k = blockIdx.x;
+    const ereal* g = gather + (size_t)k * 7 * (size_t)count;
+    __shared__ double part[256];
+    const int nt = blockDim.x, tid = threadIdx.x;
+    const int chunk = (count + nt - 1) / nt;
+    const int lo = tid * chunk;
+    int hi = lo + chunk; if (hi > count) hi = count;
+
+    double sum = 0.0, c = 0.0;
+    for (int i = lo; i < hi; ++i) {
+        const double v = 2.0 * (double(g[i]) + double(g[(size_t)count + i]))
+                       - double(g[(size_t)2 * count + i])
+                       - double(g[(size_t)3 * count + i])
+                       + double(g[(size_t)4 * count + i])
+                       + double(g[(size_t)5 * count + i])
+                       + double(g[(size_t)6 * count + i]);
+        const double y = v - c, t = sum + y;
+        c = (t - sum) - y; sum = t;
+    }
+    part[tid] = (lo < count) ? sum : 0.0;
+    __syncthreads();
+    if (tid == 0) {
+        double s = 0.0, cc = 0.0;
+        for (int i = 0; i < nt; ++i) {
+            const double y = part[i] - cc, t = s + y;
+            cc = (t - s) - y; s = t;
+        }
+        out[k] = s;
+    }
+}
+
 int energyComputeBatchDelta(energyContext* ctx, int nCand,
                             const double* x, const double* y, const double* z,
                             const int* atoms, int count,
@@ -3439,29 +3504,52 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
                                          t0 + 4 * stride, ctx->d_bgather);
             CUDA_OK(ctx, cudaPeekAtLastError());
         }
-        ctx->h_bgather.resize(need);
-        CUDA_OK(ctx, cudaMemcpy(&ctx->h_bgather[0], ctx->d_bgather,
-                                need * sizeof(ereal), cudaMemcpyDeviceToHost));
+        // Reduce on the device and bring home one number per candidate.  The
+        // host path is kept behind PROTCAD_BATCH_HOSTREDUCE because it is the
+        // reference the device schedule was validated against.
+        static const bool hostReduce = (getenv("PROTCAD_BATCH_HOSTREDUCE") != 0);
+        if (hostReduce) {
+            ctx->h_bgather.resize(need);
+            CUDA_OK(ctx, cudaMemcpy(&ctx->h_bgather[0], ctx->d_bgather,
+                                    need * sizeof(ereal), cudaMemcpyDeviceToHost));
 
-        // Kahan in the caller's atom order, per candidate, so a candidate's
-        // value does not depend on the spatial sort or on the batch size.
-        for (int k = 0; k < nCand; ++k) {
-            const ereal* g = &ctx->h_bgather[(size_t)k * 7 * count];
-            double term[7];
-            for (int t = 0; t < 7; ++t) {
-                double sum = 0.0, c = 0.0;
-                const ereal* src = g + (size_t)t * count;
-                for (int i = 0; i < count; ++i) {
-                    double yv = double(src[i]) - c;
-                    double tt = sum + yv;
-                    c = (tt - sum) - yv;
-                    sum = tt;
+            // Kahan in the caller's atom order, per candidate, so a candidate's
+            // value does not depend on the spatial sort or on the batch size.
+            for (int k = 0; k < nCand; ++k) {
+                const ereal* g = &ctx->h_bgather[(size_t)k * 7 * count];
+                double term[7];
+                for (int t = 0; t < 7; ++t) {
+                    double sum = 0.0, c = 0.0;
+                    const ereal* src = g + (size_t)t * count;
+                    for (int i = 0; i < count; ++i) {
+                        double yv = double(src[i]) - c;
+                        double tt = sum + yv;
+                        c = (tt - sum) - yv;
+                        sum = tt;
+                    }
+                    term[t] = sum;
                 }
-                term[t] = sum;
+                const double pVdw = 2.0 * term[0] - term[2];
+                const double pEle = 2.0 * term[1] - term[3];
+                if (partOut) partOut[k] = pVdw + pEle + term[4] + term[5] + term[6];
             }
-            const double pVdw = 2.0 * term[0] - term[2];
-            const double pEle = 2.0 * term[1] - term[3];
-            if (partOut) partOut[k] = pVdw + pEle + term[4] + term[5] + term[6];
+        }
+        else if (partOut) {
+            if (!ctx->d_bpart || ctx->bdPartCap < (size_t)nCand) {
+                if (ctx->d_bpart) cudaFree(ctx->d_bpart);
+                ctx->d_bpart = 0; ctx->bdPartCap = 0;
+                if (!devAlloc(&ctx->d_bpart, (size_t)nCand)) {
+                    setError(ctx, "energyComputeBatchDelta", "out of memory for parts",
+                             __FILE__, __LINE__);
+                    return -1;
+                }
+                ctx->bdPartCap = (size_t)nCand;
+            }
+            kReduceBatchPart<<<nCand, 256>>>(count, ctx->d_bgather, ctx->d_bpart);
+            CUDA_OK(ctx, cudaPeekAtLastError());
+            CUDA_OK(ctx, cudaMemcpy(partOut, ctx->d_bpart,
+                                    (size_t)nCand * sizeof(double),
+                                    cudaMemcpyDeviceToHost));
         }
     }
 

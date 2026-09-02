@@ -3,6 +3,7 @@
 
 #include "protein.h"
 #include <cstring>
+#include <chrono>
 #include "amberParams.h"
 #include <set>
 bool protein::messagesActive = false;
@@ -1906,6 +1907,45 @@ int protein::protThawDielectricForBatchCU(const vector<double>& _oldX,
 	return energyDielectricThawCount(itsEnergyContext);
 }
 
+
+// Phase timing for the delta candidate path, enabled with PROTCAD_PROFILE=1.
+// Added because the accounting did not close: on 1crn a trial costs about
+// 2.4 ms, of which kernels are 0.45 ms and host move generation 0.23 ms, and
+// guessing at the remaining 1.7 ms is how one ends up rewriting the wrong
+// thing.
+struct deltaProf
+{
+	static const int NP = 8;
+	double t[NP]; long n;
+	deltaProf() : n(0) {for (int i = 0; i < NP; i++) {t[i] = 0.0;}}
+	~deltaProf()
+	{
+		if (!n) {return;}
+		static const char* nm[NP] = {"setup (updateDeviceCoords + N copies)",
+		                             "candidate generation (K x transform)",
+		                             "thaw set construction",
+		                             "thaw fill-in",
+		                             "energySetCoords",
+		                             "energyComputeDelta (pOld)",
+		                             "energyComputeBatchDelta",
+		                             "ranking"};
+		double tot = 0.0; for (int i = 0; i < NP; i++) {tot += t[i];}
+		cout << "\ndeltaProf: " << n << " calls" << endl;
+		for (int i = 0; i < NP; i++)
+		{	cout << "  " << nm[i] << "  " << t[i] << " s  "
+			     << (t[i] * 1e6 / n) << " us/trial  "
+			     << (tot > 0 ? 100.0 * t[i] / tot : 0.0) << " %" << endl; }
+		cout << "  TOTAL  " << tot << " s  " << (tot * 1e6 / n) << " us/trial" << endl;
+	}
+};
+static deltaProf g_deltaProf;
+static const bool g_deltaProfOn = (getenv("PROTCAD_PROFILE") != 0);
+static double profNow()
+{	return std::chrono::duration<double>(
+	         std::chrono::steady_clock::now().time_since_epoch()).count(); }
+#define PROF_T(i, expr) do { if (g_deltaProfOn) { const double _a = profNow(); expr; \
+	g_deltaProf.t[i] += profNow() - _a; } else { expr; } } while (0)
+
 double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
                                               UInt _numCandidates,
                                               vector < vector <double> > &_bestConf,
@@ -1914,6 +1954,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
                                               vector<double>* _allEnergies,
                                               vector < vector < vector <double> > >* _allConfs)
 {
+	const double _p0 = g_deltaProfOn ? profNow() : 0.0;
 	int N = updateDeviceCoords();
 	if (N == 0 || _numCandidates == 0 || !itsEnergyContext) {return 1E30;}
 
@@ -1921,6 +1962,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	if (entryConf.empty()) {return 1E30;}
 
 	const vector<double> oldX = itsCoordX, oldY = itsCoordY, oldZ = itsCoordZ;
+	if (g_deltaProfOn) {g_deltaProf.t[0] += profNow() - _p0; g_deltaProf.n++;}
 
 	// Only the moved residue's atoms can differ between candidates, so seed
 	// every slice from the entry geometry once and then overwrite that residue.
@@ -1941,6 +1983,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	vector <double> bx((size_t)_numCandidates * N, 0.0),
 	                by((size_t)_numCandidates * N, 0.0),
 	                bz((size_t)_numCandidates * N, 0.0);
+	const double _p1 = g_deltaProfOn ? profNow() : 0.0;
 	for (UInt k = 0; k < _numCandidates; k++)
 	{
 		confs[k] = randContinuousSidechainConformation(_chainIndex, _resIndex);
@@ -1955,23 +1998,29 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	}
 	setSidechainDihedralAngles(_chainIndex, _resIndex, entryConf);
 	refreshDeviceCoords(resAtoms);
+	if (g_deltaProfOn) {g_deltaProf.t[1] += profNow() - _p1;}
 	// Seed the spatial order from the entry conformation, so every candidate is
 	// culled and ranked against the same order and the delta's tile list means
 	// the same thing for all of them.
+	const double _p4 = g_deltaProfOn ? profNow() : 0.0;
 	energySetCoords(itsEnergyContext, &itsCoordX[0], &itsCoordY[0], &itsCoordZ[0]);
+	if (g_deltaProfOn) {g_deltaProf.t[4] += profNow() - _p4;}
 
 	// The thaw set is the batch's, not any one candidate's, and it has to be
 	// installed before the pre-move part is measured: P(old) and P(new) must be
 	// taken over the same set or the difference is not a difference.
 	int nMoved = 0;
+	const double _p2 = g_deltaProfOn ? profNow() : 0.0;
 	const int nThaw = protThawDielectricForBatchCU(oldX, oldY, oldZ, bx, by, bz,
 	                                               (int)_numCandidates, 0.0, &nMoved,
 	                                               1e-9, &resAtoms);
+	if (g_deltaProfOn) {g_deltaProf.t[2] += profNow() - _p2;}
 	if (nThaw <= 0) {return 1E30;}
 
 	// Fill in the thawed atoms outside the moved residue.  They are unchanged
 	// by definition, but the batch reads coordinates for every atom of the
 	// changed set and will not infer that.
+	const double _p3 = g_deltaProfOn ? profNow() : 0.0;
 	{
 		vector<unsigned char> isRes((size_t)N, 0);
 		for (size_t m = 0; m < resAtoms.size(); m++) {isRes[resAtoms[m]] = 1;}
@@ -1987,11 +2036,15 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 		}
 	}
 
+	if (g_deltaProfOn) {g_deltaProf.t[3] += profNow() - _p3;}
+	const double _p5 = g_deltaProfOn ? profNow() : 0.0;
 	double pOld = 0.0, torOld = 0.0;
 	if (energyComputeDelta(itsEnergyContext, 0, 0, 0, &itsThawList[0],
 	                       (int)itsThawList.size(), &pOld, &torOld))
 	{	return 1E30; }
 
+	if (g_deltaProfOn) {g_deltaProf.t[5] += profNow() - _p5;}
+	const double _p6 = g_deltaProfOn ? profNow() : 0.0;
 	vector<double> parts(_numCandidates, 0.0), tors(_numCandidates, 0.0);
 	if (energyComputeBatchDelta(itsEnergyContext, (int)_numCandidates,
 	                            &bx[0], &by[0], &bz[0], &itsThawList[0],
@@ -2002,6 +2055,8 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 		return 1E30;
 	}
 
+	if (g_deltaProfOn) {g_deltaProf.t[6] += profNow() - _p6;}
+	const double _p7 = g_deltaProfOn ? profNow() : 0.0;
 	UInt best = 0; double bestE = 1E30;
 	if (_allEnergies) {_allEnergies->assign(_numCandidates, 0.0);}
 	for (UInt k = 0; k < _numCandidates; k++)
@@ -2014,6 +2069,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	_bestConf = confs[best];
 	_nbBest = _nbCurrent - pOld + parts[best];
 	_torBest = tors[best];
+	if (g_deltaProfOn) {g_deltaProf.t[7] += profNow() - _p7;}
 	return bestE;
 }
 

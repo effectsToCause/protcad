@@ -206,3 +206,55 @@ coordinates. And on 1crn the descent never actually flattens below 1 kcal/mol
 per doubling, so the 256-sweep cap is doing the stopping there, not the
 criterion. The knob is real; there is no free lunch on a structure that keeps
 paying a little forever.
+
+## Where the time actually goes
+
+Prompted by asking how well the GPU is used on the smallest structure. The
+answer was 19% kernel-resident wall on 1crn, which raised the obvious proposal:
+keep coordinates on the device for the whole minimisation and do the torsion
+transforms there too. Measured, that proposal is aimed at the wrong 81%.
+
+Per-trial phase timing (`PROTCAD_PROFILE=1`, `projects/hostMoveProbe.cc` for the
+move-generation half):
+
+| phase                          | 1crn    | 1ake    |
+|--------------------------------|---------|---------|
+| `energyComputeBatchDelta`      | 1777 us | 6761 us |
+| `energyComputeDelta` (pOld)    |  223 us |  450 us |
+| candidate generation, K x transform | 187 us | 243 us |
+| setup, thaw, fill-in, ranking  |  115 us |  922 us |
+| **trial**                      | 2302 us | 8377 us |
+
+The host torsion transform is 8% on 1crn and 3% on 1ake, so moving it to the
+device buys almost nothing, and coordinates were never the problem: uploads are
+already restricted to the changed set. Of `energyComputeBatchDelta`'s 1777 us,
+only about 450 us was kernel time.
+
+The gap was the *return* path. `kGatherTermsBatch` wrote 7 values per changed
+atom per candidate and all of it came home to be Kahan-summed on the host --
+58k double adds behind a 233 kB transfer per trial on 1crn, 137k on 1ake. The
+changed set is the one quantity in this path that grows with the structure, so
+it was the worst possible thing to move across the bus.
+
+The seven terms combine linearly, so each atom's contribution collapses to one
+scalar and each candidate to one number. `kReduceBatchPart` does that on the
+device and returns `nCand` doubles instead of `7 * count * nCand`. The host
+version's determinism guarantee is the binding constraint and is preserved:
+each thread sums one contiguous index range in order and thread zero combines
+partials in thread order, so a candidate's energy is a function of `count` alone
+and does not depend on the spatial sort or the batch size. A strided or tree
+reduction would be faster and would quietly break that. `PROTCAD_BATCH_HOSTREDUCE=1`
+restores the host path.
+
+Worst relative error is unchanged at 2.39e-07 on 1crn. Per trial: 2317 -> 1676 us
+(1.38x) on 1crn, 3666 -> 2639 us (1.39x) on 1ubq, 8286 -> 7057 us (1.17x) on
+1ake. A 1crn minimisation goes 30.7 s -> 25.4 s, and the cheap repeat passes
+0.97 s -> 0.19 s.
+
+This does not finish the job. `energyComputeBatchDelta` is still 68% of a trial
+against ~450 us of kernel time, so roughly 700 us remains in staging, the
+now-pointless `7 * count * nCand` device write, and ~31 launches per trial. The
+next rung is fusing the reduction into `kGatherTermsBatch` so the intermediate
+is never materialised. Duty cycle is still about 27%, and the kernels themselves
+are latency-bound: 12x the atoms costs 1.7x the `kEnergy` time, so the device is
+not close to saturated at any size in this corpus.
