@@ -46,6 +46,14 @@ int main(int argc, char** argv)
 	prot->silenceMessages();
 	prot->loadDeviceMemAll();
 
+	// Nonbonded truncation under test.  protSetCutoffCU keeps the 2 A switching
+	// window, so the taper moves with the cutoff rather than being clipped.
+	const double refCut = prot->protGetCutoffCU();
+	const double workCut = getenv("PROTCAD_CUTOFF")
+	                     ? atof(getenv("PROTCAD_CUTOFF")) : refCut;
+	if (workCut != refCut) {prot->protSetCutoffCU(workCut);}
+	printf("  cutoff: minimising at %.2f A, refereed at %.2f A\n", workCut, refCut);
+
 	vector< pair<UInt, UInt> > movable;
 	for (UInt c = 0; c < prot->getNumChains(); c++)
 		for (UInt r = 0; r < prot->getNumResidues(c); r++)
@@ -111,7 +119,21 @@ int main(int argc, char** argv)
 		}
 	}
 
+	// Score the structure the search actually ended on, first at the cutoff it
+	// was optimised under and then at the reference cutoff.  Comparing runs on
+	// their own working energy would only say that a shorter cutoff reports a
+	// different number; the referee says whether the search found as good a
+	// structure.
+	prot->protReleaseDielectricCU();
+	double nbEnd = 0.0, endWork = 0.0;
+	prot->minDeltaAnchorCU(nbEnd, endWork);
+	prot->protReleaseDielectricCU();
+	prot->protSetCutoffCU(refCut);
+	double nbRef = 0.0, endRef = 0.0;
+	prot->minDeltaAnchorCU(nbRef, endRef);
 	prot->protReleaseDielectricCU();
 	printf("  start %.4f  best %.4f  total gain %.4f\n", start, best, start - best);
+	printf("  final(work %.2f) %.4f   final(referee %.2f) %.4f\n",
+	       workCut, endWork, refCut, endRef);
 	return 0;
 }

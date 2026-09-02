@@ -890,3 +890,53 @@ walking essentially the same neighbourhood a second time. Two independent
 traversals of one neighbour structure is the redundancy worth looking at next,
 and it is the same lesson as the last two wins: the win was never cheaper
 physics, it was work being done more than once.
+
+## Sharing one cutoff between occupancy and energy: measured, and rejected
+
+kOccupancy and kEnergy walk the same tiles and compute the same `dx,dy,dz,r2`,
+so the distance work looks shared. It is not, because the radii differ:
+kEnergy truncates at `p.cutoff` = 12.0 A, while kOccupancy tests against
+`shellI + rj` where `shellI = ri + 4.35`, i.e. roughly 7.8 A. Occupancy's pair
+set is a spatial subset, about 27% of the energy set by volume.
+
+The obvious move is to bring the two together by lowering the nonbonded cutoff.
+`minStopBench` now takes `PROTCAD_CUTOFF` and, critically, **scores the final
+structure at the reference cutoff as well as the working one** -- comparing runs
+on their own working energy would only show that a shorter cutoff reports a
+different number, not whether the search found as good a structure.
+
+1ake, 512 trials, seed 7:
+
+| cutoff | kEnergy | us/trial | final @ 12 A referee | quality lost |
+|---|---|---|---|---|
+| 12 | 938.3 | 2064.8 | **-310.47** | -- |
+| 10 | 808.0 | 1940.9 | -192.05 | 118.4 |
+| 9  | 746.9 | 1887.1 | -159.67 | 150.8 |
+| 8  | 680.3 | 1827.5 | -122.06 | 188.4 |
+| 7  | 585.1 | 1712.4 | -141.92 | 168.6 |
+
+The referee path validates itself: at 12 A it reproduces the search's own best
+to four decimals (-310.4735 against -310.4738).
+
+**Rejected.** Truncating at 8 A buys 11% of wall clock and gives up 188 kcal/mol,
+which is 35% of the entire 536 kcal/mol gain the search achieves. Even 10 A
+costs 118 kcal/mol for 6%. Electrostatics still falls as 1/r after the local
+dielectric divides it, so a short cutoff is cutting real charge-charge terms,
+and the working energies going strongly positive at 7-8 A while the referee
+stays negative says the short-cutoff surface is a differently conditioned
+landscape rather than a shifted one.
+
+Two further facts worth keeping:
+
+**kOccupancy is flat in `p.cutoff`** -- 349.6, 353.1, 353.3, 354.7, 354.7 us
+across the sweep -- because it is bounded by shell radii, not by the nonbonded
+cutoff. So even at a matched radius the two kernels would not share anything
+automatically; collecting the benefit would still require writing the fused
+kernel, and that still pays the pair-list traffic. The savings ceiling for any
+such fusion is now measured at **355 us/trial**.
+
+**kEnergy is strongly sublinear in cutoff volume.** 12 -> 8 A is a 0.30 volume
+ratio but only a 0.72 time ratio. Tile-level pruning and the fixed traversal
+do not shrink with the radius, which is consistent with the layered ablation:
+the traversal-and-staging floor is ~180 us regardless of how much physics
+survives.
