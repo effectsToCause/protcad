@@ -4239,3 +4239,54 @@ dblVec residue::getBackBoneCentroid()
 	centroid = temp->getCoords();
 	return centroid;
 }
+
+// Collect the residue-local indices of every atom strictly below _node in the
+// bonding tree.  These are exactly the atoms a rotation about the chi bond
+// carries with it: residue::rotate translates the pair to the origin, applies
+// the matrix to the children of the second atom, and translates back, so the
+// axis atoms themselves are never rotated.
+void residue::collectSubtreeLocal(treeNode* _node, vector<int>& _out) const
+{	treeNode* t = _node->getChild();
+	while (t)
+	{	atom* a = static_cast<atom*>(t);
+		for (UInt i = 0; i < itsAtoms.size(); i++)
+		{	if (itsAtoms[i] == a) {_out.push_back((int)i); break;} }
+		collectSubtreeLocal(t, _out);
+		t = t->getNextSib();
+	}
+}
+
+// Describe every sidechain chi of this residue as a rigid rotation: the two
+// atoms whose bond is the axis, the atoms carried by it, and the angle the
+// residue currently sits at.  This is the same information setChi rediscovers
+// on every call -- it measures the current dihedral and walks the subtree --
+// but it is a property of the residue type and the entry geometry, so it can
+// be read once and reused for as many candidate conformations as we like.
+// Indices are residue-local; the caller maps them to whatever numbering it
+// keeps its coordinates in.
+void residue::chiRotationTopology(vector<int>& _bpt, vector<int>& _idx,
+                                  vector<int>& _axis1, vector<int>& _axis2,
+                                  vector<double>& _entry,
+                                  vector<int>& _movedFlat, vector<int>& _movedOff)
+{	_bpt.clear(); _idx.clear(); _axis1.clear(); _axis2.clear();
+	_entry.clear(); _movedFlat.clear(); _movedOff.clear();
+	_movedOff.push_back(0);
+	const UInt nbpt = getNumBpt(itsType);
+	for (UInt i = 0; i < nbpt; i++)
+	{	const UInt nd = getNumDihedralAngles(itsType, i);
+		if (i >= dataBase[itsType].chiDefinitions.size()) {break;}
+		for (UInt j = 0; j < nd; j++)
+		{	if (j + 2 >= dataBase[itsType].chiDefinitions[i].size()) {break;}
+			const UInt a1 = dataBase[itsType].chiDefinitions[i][j+1];
+			const UInt a2 = dataBase[itsType].chiDefinitions[i][j+2];
+			if (a1 >= itsAtoms.size() || a2 >= itsAtoms.size()) {break;}
+			_bpt.push_back((int)i);
+			_idx.push_back((int)j);
+			_axis1.push_back((int)a1);
+			_axis2.push_back((int)a2);
+			_entry.push_back(getChi(i, j));
+			collectSubtreeLocal(itsAtoms[a2], _movedFlat);
+			_movedOff.push_back((int)_movedFlat.size());
+		}
+	}
+}

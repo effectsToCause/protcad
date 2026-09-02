@@ -422,6 +422,13 @@ public:
 	void setChi (const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _chi, const double _angle);
 	double getChi (const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _chi) { return itsChains[_chainIndex]->getChi(_resIndex, _bpt, _chi); }
 	vector < vector <double> >  getSidechainDihedrals(UInt _chainIndex, UInt _indexInChain) {return itsChains[_chainIndex]->getSidechainDihedralAngles(_indexInChain);}
+	void chiRotationTopologyCU(UInt _chainIndex, UInt _indexInChain,
+	                           vector<int>& _bpt, vector<int>& _idx,
+	                           vector<int>& _axis1, vector<int>& _axis2,
+	                           vector<double>& _entry,
+	                           vector<int>& _movedFlat, vector<int>& _movedOff)
+	{	itsChains[_chainIndex]->chiRotationTopology(_indexInChain, _bpt, _idx, _axis1,
+		                                            _axis2, _entry, _movedFlat, _movedOff); }
 	void setSidechainDihedralAngles(UInt _chainIndex, UInt _indexInChain, vector< vector<double> > Angles);
 	vector< vector< double > > randContinuousSidechainConformation(UInt _chainIndex, UInt _resIndex) {return itsChains[_chainIndex]->randContinuousSidechainConformation(_resIndex);}
 

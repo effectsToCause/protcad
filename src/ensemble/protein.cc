@@ -1915,7 +1915,7 @@ int protein::protThawDielectricForBatchCU(const vector<double>& _oldX,
 // thing.
 struct deltaProf
 {
-	static const int NP = 8;
+	static const int NP = 9;
 	double t[NP]; long n;
 	deltaProf() : n(0) {for (int i = 0; i < NP; i++) {t[i] = 0.0;}}
 	~deltaProf()
@@ -1924,11 +1924,12 @@ struct deltaProf
 		static const char* nm[NP] = {"setup (updateDeviceCoords + N copies)",
 		                             "candidate generation (K x transform)",
 		                             "thaw set construction",
-		                             "thaw fill-in",
+		                             "  cand: random draw",
 		                             "energySetCoords",
-		                             "energyComputeDelta (pOld)",
+		                             "  cand: chi transform",
 		                             "energyComputeBatchDelta",
-		                             "ranking"};
+		                             "ranking",
+		                             "  cand: refresh + copy"};
 		double tot = 0.0; for (int i = 0; i < NP; i++) {tot += t[i];}
 		cout << "\ndeltaProf: " << n << " calls" << endl;
 		for (int i = 0; i < NP; i++)
@@ -1939,6 +1940,41 @@ struct deltaProf
 	}
 };
 static deltaProf g_deltaProf;
+static const bool g_hostChi = (getenv("PROTCAD_HOSTCHI") != 0);
+
+// Apply one chi rotation in place over a flat residue-local coordinate block.
+// This is residue::rotate with the object graph taken out of it: the same
+// translate-to-origin, rotate-children, translate-back, and the same rotation
+// matrix as CMath::rotationMatrix, including its truncated degree conversion,
+// so the geometry it produces is the geometry the residue would have produced.
+// What it does not do is walk a pointer tree three times or allocate a dblVec
+// per atom and a dblMat per call, which is where the time was going.
+static void chiRotateFlat(double* wx, double* wy, double* wz,
+                          const int a1, const int a2, const double thetaDeg,
+                          const int* moved, const int nMoved)
+{
+	const double ox = wx[a1], oy = wy[a1], oz = wz[a1];
+	const double vx = wx[a2] - ox, vy = wy[a2] - oy, vz = wz[a2] - oz;
+	const double norm = sqrt(vx*vx + vy*vy + vz*vz);
+	if (norm == 0.0) {return;}
+	const double n1 = vx / norm, n2 = vy / norm, n3 = vz / norm;
+	const double degToRad = 0.017453293;
+	const double theta = degToRad * thetaDeg;
+	const double s = sin(theta), c = cos(theta);
+	const double n11 = n1*n1, n12 = n1*n2, n13 = n1*n3;
+	const double n22 = n2*n2, n23 = n2*n3, n33 = n3*n3;
+	const double r00 = n11 + (1-n11)*c, r01 = n12*(1-c) - n3*s, r02 = n13*(1-c) + n2*s;
+	const double r10 = n12*(1-c) + n3*s, r11 = n22 + (1-n22)*c, r12 = n23*(1-c) - n1*s;
+	const double r20 = n13*(1-c) - n2*s, r21 = n23*(1-c) + n1*s, r22 = n33 + (1-n33)*c;
+	for (int i = 0; i < nMoved; i++)
+	{
+		const int m = moved[i];
+		const double px = wx[m] - ox, py = wy[m] - oy, pz = wz[m] - oz;
+		wx[m] = r00*px + r01*py + r02*pz + ox;
+		wy[m] = r10*px + r11*py + r12*pz + oy;
+		wz[m] = r20*px + r21*py + r22*pz + oz;
+	}
+}
 static const bool g_deltaProfOn = (getenv("PROTCAD_PROFILE") != 0);
 static double profNow()
 {	return std::chrono::duration<double>(
@@ -1996,11 +2032,72 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	vector<double>& by = itsBatchY;
 	vector<double>& bz = itsBatchZ;
 	const double _p1 = g_deltaProfOn ? profNow() : 0.0;
+	// Every chi is a rigid rotation of a fixed subset of the residue about a
+	// fixed bond, and both the subset and the entry angle are properties of the
+	// residue we are about to leave untouched.  Reading them once and driving a
+	// flat coordinate block is the same geometry the residue object produces,
+	// arrived at without measuring a dihedral we already know or walking a
+	// pointer tree three times per chi per candidate.
+	//
+	// It also generates every candidate from the *entry* conformation rather
+	// than from its predecessor's.  That is the arithmetic the caller uses when
+	// it adopts the winner -- it applies the chosen chis to the entry residue --
+	// so the evaluated geometry and the adopted geometry are now reached the
+	// same way instead of by two different chains of rotations.
+	const int nRes = (int)resAtoms.size();
+	if (!g_hostChi)
+	{
+		vector<int> cBpt, cIdx, cA1, cA2, cMoved, cOff; vector<double> cEntry;
+		chiRotationTopologyCU(_chainIndex, _resIndex, cBpt, cIdx, cA1, cA2,
+		                      cEntry, cMoved, cOff);
+		vector<double> wx((size_t)nRes), wy((size_t)nRes), wz((size_t)nRes);
+		const int nChi = (int)cBpt.size();
+		for (UInt k = 0; k < _numCandidates; k++)
+		{
+			const double _c0 = g_deltaProfOn ? profNow() : 0.0;
+			confs[k] = randContinuousSidechainConformation(_chainIndex, _resIndex);
+			const double _c1 = g_deltaProfOn ? profNow() : 0.0;
+			for (int m = 0; m < nRes; m++)
+			{	const int i = resAtoms[m];
+				wx[m] = oldX[i]; wy[m] = oldY[i]; wz[m] = oldZ[i]; }
+			for (int c = 0; c < nChi; c++)
+			{
+				const int b = cBpt[c], d = cIdx[c];
+				if (b >= (int)confs[k].size() || d >= (int)confs[k][b].size()) {continue;}
+				const double target = confs[k][b][d];
+				// 1000.0 is the "no measurable dihedral" sentinel, the same one
+				// chain::setSidechainDihedralAngles skips over.
+				if (target > 999.0) {continue;}
+				if (cA1[c] >= nRes || cA2[c] >= nRes) {continue;}
+				chiRotateFlat(&wx[0], &wy[0], &wz[0], cA1[c], cA2[c],
+				              target - cEntry[c], &cMoved[cOff[c]], cOff[c+1] - cOff[c]);
+			}
+			const double _c2 = g_deltaProfOn ? profNow() : 0.0;
+			const size_t off = (size_t)k * N;
+			for (int m = 0; m < nRes; m++)
+			{	const int i = resAtoms[m];
+				bx[off + i] = wx[m]; by[off + i] = wy[m]; bz[off + i] = wz[m]; }
+			if (g_deltaProfOn)
+			{	g_deltaProf.t[3] += _c1 - _c0;
+				g_deltaProf.t[5] += _c2 - _c1;
+				g_deltaProf.t[8] += profNow() - _c2; }
+		}
+		// The residue was never moved, so there is nothing to restore.
+	}
+	else
+	{
 	for (UInt k = 0; k < _numCandidates; k++)
 	{
+		const double _c0 = g_deltaProfOn ? profNow() : 0.0;
 		confs[k] = randContinuousSidechainConformation(_chainIndex, _resIndex);
+		const double _c1 = g_deltaProfOn ? profNow() : 0.0;
 		setSidechainDihedralAngles(_chainIndex, _resIndex, confs[k]);
+		const double _c2 = g_deltaProfOn ? profNow() : 0.0;
 		refreshDeviceCoords(resAtoms);
+		if (g_deltaProfOn)
+		{	g_deltaProf.t[3] += _c1 - _c0;
+			g_deltaProf.t[5] += _c2 - _c1;
+			g_deltaProf.t[8] += profNow() - _c2; }
 		const size_t off = (size_t)k * N;
 		for (size_t m = 0; m < resAtoms.size(); m++)
 		{
@@ -2010,6 +2107,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	}
 	setSidechainDihedralAngles(_chainIndex, _resIndex, entryConf);
 	refreshDeviceCoords(resAtoms);
+	}
 	{
 		const size_t off = (size_t)_numCandidates * N;
 		for (size_t m = 0; m < resAtoms.size(); m++)

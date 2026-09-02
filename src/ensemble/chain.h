@@ -157,6 +157,11 @@ public:
 	void setDihedralWithoutBuffering(const UInt _indexInChain, const UInt _bpt, const UInt _dihedralIndex, const double _dihedralAngle);
 	vector< vector< double> > getSidechainDihedralAngles(UInt _indexInChain);
 	void setSidechainDihedralAngles(UInt _indexInChain, vector< vector<double> > Angles);
+	void chiRotationTopology(UInt _indexInChain,
+	                         vector<int>& _bpt, vector<int>& _idx,
+	                         vector<int>& _axis1, vector<int>& _axis2,
+	                         vector<double>& _entry,
+	                         vector<int>& _movedFlat, vector<int>& _movedOff);
 	int chooseNextTargetPosition(ran& _ran);
 	UInt chooseNextMutationIdentity(ran& _ran, vector <int> _position) { return chooseTargetIdentity(_position[2],_ran); }
 	residue* superimposeGLY(const UInt _residue);

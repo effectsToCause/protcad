@@ -132,6 +132,12 @@ int main(int argc, char** argv)
 		// set the delta used still in place.
 		for (UInt k = 0; k < nCand; k++)
 		{
+			// Reach every candidate from the entry conformation, which is how
+			// the minimiser adopts the winner.  Chaining one candidate off the
+			// last leaves each rotation to be measured from a geometry that has
+			// already been rotated 30 times, and the drift that accumulates is
+			// the reference's, not the delta's.
+			prot->setSidechainDihedralAngles(c, r, entry);
 			prot->setSidechainDihedralAngles(c, r, confs[k]);
 			const double full = prot->protEnergyCU();
 			check("batch delta", (int)k, deltaE[k], full);
@@ -147,6 +153,7 @@ int main(int argc, char** argv)
 		UInt argFull = 0; double bestFull = 1E30;
 		for (UInt k = 0; k < nCand; k++)
 		{
+			prot->setSidechainDihedralAngles(c, r, entry);
 			prot->setSidechainDihedralAngles(c, r, confs[k]);
 			const double full = prot->protEnergyCU();
 			if (k == 0 || full < bestFull) {bestFull = full; argFull = k;}

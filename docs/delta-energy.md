@@ -427,3 +427,64 @@ Worst relative error in `batchDeltaTest` is unchanged at 3.21e-07 and descent
 trajectories are identical to the host-reduction reference, as they must be:
 the atoms that stopped being staged were being written with the values they
 already held.
+
+## The candidate transform, and why it did not go to the GPU
+
+With the batch delta down, candidate generation had risen to 19% of a trial on
+1crn, so it was the next thing to look at.  Splitting it three ways showed the
+whole cost in one place: of 193 us per trial, the random draw was 4.8 us, the
+readback and copy 14 us, and `setSidechainDihedralAngles` 167 us.
+
+Instrumenting `residue::setChi` split that again: 0.94 us measuring the current
+dihedral and 1.77 us applying the rotation, over roughly 63 calls a trial.  That
+is about 2.7 us to rotate a handful of atoms about one bond, which is far too
+much to be arithmetic.  It is not arithmetic.  `getChi` builds a `UIntVec` by
+value and recomputes a dihedral we already know -- we set it ourselves on the
+previous candidate -- and `rotate` walks the atom subtree three times, once to
+translate to the origin, once to transform, once to translate back, allocating
+a `dblVec` per atom and a `dblMat` per call along the way.
+
+So the obvious move was to put the transform on the GPU, and the obvious move
+was wrong.  The work is about 480 atoms per trial.  A kernel launch plus the
+angles up and the coordinates back is 20-30 us before any arithmetic happens,
+and the arithmetic here is a few hundred multiply-adds.  The device was never
+the fix; the allocator was.  `chiRotateFlat` performs exactly the rotation
+`residue::rotate` performs -- same translate-rotate-translate, same matrix,
+including CMath's truncated `0.017453293` -- over a flat block of residue
+coordinates, with no tree walk and no allocation:
+
+| phase (us/trial) | 1crn | 1ubq | 1ake |
+|---|---|---|---|
+| candidate generation, before |  193 |  238 |  285 |
+| candidate generation, after  |   16 |   19 |   22 |
+| of which the transform       |  4.3 |  5.7 |  6.1 |
+
+The transform itself went 167 -> 4.3 us, a factor of 39, and the phase is now
+2.3% of a trial on 1crn and 0.8% on 1ake.  A device port would now be competing
+against 4 us with a 10 us launch.  There is nothing left here to move.
+
+### It is also more accurate than what it replaced
+
+The old loop reached each candidate from the last one's geometry, because
+`setChi` is a delta operation: it measures where the residue currently sits and
+rotates by the difference.  Thirty-two of those in a row accumulate drift.  The
+flat transform reaches every candidate from the entry conformation instead --
+which is what the caller does when it adopts the winner, since it applies the
+chosen chis to the restored entry residue.  Evaluated geometry and adopted
+geometry are now reached the same way.
+
+`batchDeltaTest` was chaining its reference the same way the generator did, so
+the two drifted together and the test was partly comparing a path to itself.
+Against a reference that reaches each candidate from entry:
+
+| generation path | worst relative error |
+|---|---|
+| flat transform from entry | 1.88e-06 |
+| residue object, chained   | 7.25e-06 |
+
+The old path is nearly four times further from a clean full evaluation than the
+new one.  The reported 3.21e-07 was flattering rather than accurate.  The gate
+stays at 5e-6 and the suite is 12/12.
+
+1ake over 512 trials: 2.24 -> 2.10 s wall.  1crn: 0.91 -> 0.82 s.
+`PROTCAD_HOSTCHI=1` restores the residue-object generator for A/B.

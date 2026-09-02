@@ -161,6 +161,11 @@ public:
 	DouVec setRotamerWithCheckTest(const UInt _lib, const UInt _bpt, const UInt _rotamer);
 	void setChiByDelta(const UInt _bpt, const UInt _index, const double _angleDelta);
 	void setChi(const UInt _bpt, const UInt _index, const double _angle);
+	void chiRotationTopology(vector<int>& _bpt, vector<int>& _idx,
+	                         vector<int>& _axis1, vector<int>& _axis2,
+	                         vector<double>& _entry,
+	                         vector<int>& _movedFlat, vector<int>& _movedOff);
+	void collectSubtreeLocal(treeNode* _node, vector<int>& _out) const;
 	void setChi(const UInt _index, const double _angle);
 	void setBetaChi(const double _angle);
 	void setPolarHChi(const UInt _rotamerIndex);

@@ -2404,3 +2404,13 @@ dblVec chain::getBackBoneCentroid()
 	centroid = centroid/size;
 	return centroid;
 }
+
+void chain::chiRotationTopology(UInt _indexInChain,
+                                vector<int>& _bpt, vector<int>& _idx,
+                                vector<int>& _axis1, vector<int>& _axis2,
+                                vector<double>& _entry,
+                                vector<int>& _movedFlat, vector<int>& _movedOff)
+{	itsResidues[_indexInChain]->chiRotationTopology(_bpt, _idx, _axis1, _axis2,
+	                                                _entry, _movedFlat, _movedOff);
+}
+
