@@ -614,3 +614,49 @@ Monotonicity comes entirely from the best-conformation fix.  The acceptance fix
 is worth a further 2.13 kcal, and the wall time tells you why: the too-cold
 sampler was converging falsely at 8.2 s.  Corrected, the pass costs what it cost
 before the best-conformation fix was added and now keeps what it finds.
+
+## Widening the batch does not help kEnergy
+
+Widening the candidate batch past 32 has been the standing suggestion for
+kEnergy, which is 58% of the batch delta and the largest single cost left.  The
+determinism constraint turns out not to bind: candidate k is `blockIdx.y` and
+owns its own slice of every buffer, `chooseSplit` keys off `nTiles` only, and
+the batch path sizes `dSplit` against `nList * nCand`.  A candidate's energy
+does not depend on how many candidates share its batch, so the batch may be
+widened freely.  It just does not pay.
+
+1ake, 7814 atoms, 64 trials, `PROTCAD_CANDIDATES`:
+
+    nCand   kEnergy      per cand     trial       per cand
+        8    328.1 us     41.01 us    1201.1 us   150.14 us
+       16    556.3        34.77       1525.7       95.36
+       32   1037.3        32.42       2227.0       69.59
+       64   2103.9        32.87       3784.6       59.13
+      128   4409.9        34.45       7224.2       56.44
+
+kEnergy is linear in nCand from 32 upward -- 32.4, 32.9, 34.5 us per candidate.
+The knee is between 16 and 32, and 32 is already past it.  There is no occupancy
+left to buy: at 32 candidates the grid is saturated, which is also why
+`PROTCAD_ENERGY_JSPLIT` moves nothing in this path.  The batch dSplit rule
+already collapses to 1 for exactly this reason.
+
+The earlier "kEnergy is latency-bound, 12x atoms gives 1.7x time" holds, but it
+is a statement about scaling in *atoms* at fixed nCand, where the thawed set and
+the tiles are underfilled.  In the *candidate* dimension the device is full.
+The two are not in tension and only the first one was ever measured.
+
+Per-candidate *trial* cost does keep falling (150 -> 56 us) because the fixed
+per-trial overhead amortises, so a wider batch remains defensible on grounds of
+move quality per unit time.  That is an argument about the search, not about
+kEnergy, and it should be settled on minimisation outcome rather than on
+throughput.
+
+What is left for kEnergy is algorithmic -- fewer or better-pruned candidates --
+or precision.  Nothing remains at the launch-configuration level.
+
+### A measurement that was almost reported
+
+The first sweep showed kEnergy flat at 1035-1037 us across a 32x change in
+nCand, which would have been a spectacular result.  `minStopBench` has its own
+hardcoded `nCand = 32` and never read the environment override, so the sweep ran
+the same configuration six times.  The knob is now wired through to the bench.

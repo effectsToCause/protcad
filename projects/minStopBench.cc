@@ -36,7 +36,7 @@ int main(int argc, char** argv)
 	const char* path = (argc > 1) ? argv[1] : "tests/data/1crn.pdb";
 	const int trials = (argc > 2) ? atoi(argv[2]) : 4096;
 	const int seed   = (argc > 3) ? atoi(argv[3]) : 20260902;
-	const UInt nCand = 32;
+	const UInt nCand = getenv("PROTCAD_CANDIDATES") ? (UInt)atoi(getenv("PROTCAD_CANDIDATES")) : 32;
 	const int anchorEvery = 64;
 
 	PDBInterface* thePDB = new PDBInterface(path);

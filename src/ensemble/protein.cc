@@ -2944,7 +2944,8 @@ double protein::relaxSidechainsCU(UIntVec _frozenResidues, UIntVec _activeChains
 	double pastEnergy = protEnergyCU();
 	if (_activeChains.size() == 0) {return pastEnergy;}
 
-	const UInt SIDECHAIN_CANDIDATES = 32;
+	static const UInt SIDECHAIN_CANDIDATES =
+		getenv("PROTCAD_CANDIDATES") ? (UInt)atoi(getenv("PROTCAD_CANDIDATES")) : 32;
 	vector < vector <double> > currentConf, newConf;
 	double trialEnergy;
 
@@ -3158,7 +3159,8 @@ void protein::protMinCU(bool _backbone, UIntVec _frozenResidues, UIntVec _active
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
 	UInt chainNum = _activeChains.size(), plateau = _plateau;
-	const UInt SIDECHAIN_CANDIDATES = 32;
+	static const UInt SIDECHAIN_CANDIDATES =
+		getenv("PROTCAD_CANDIDATES") ? (UInt)atoi(getenv("PROTCAD_CANDIDATES")) : 32;
 	double trialEnergy = 0.0; bool haveTrialEnergy = false;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
 	//double rotX, rotY, rotZ, transX, transY, transZ;
@@ -3357,7 +3359,8 @@ void protein::protMinCU(bool _backbone, UInt _plateau)
 	//--Initialize variables for loop, calculate starting energy and build energy vectors-----
 	UInt randchain, randres, resnum, backboneOrSidechain = 1;
 	UInt chainNum = getNumChains(), plateau = _plateau;
-	const UInt SIDECHAIN_CANDIDATES = 32;
+	static const UInt SIDECHAIN_CANDIDATES =
+		getenv("PROTCAD_CANDIDATES") ? (UInt)atoi(getenv("PROTCAD_CANDIDATES")) : 32;
 	double trialEnergy = 0.0; bool haveTrialEnergy = false;
 	double Energy, pastEnergy = protEnergyCU(), deltaEnergy, sPhi, sPsi,nobetter = 0.0, KT = KB*Temperature();
 	//double rotX, rotY, rotZ, transX, transY, transZ;
