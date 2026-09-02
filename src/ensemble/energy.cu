@@ -3543,6 +3543,21 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
     if (buildDeltaSet(ctx, atoms, count, &rebuiltSet) != 0) return -1;
     const int nList = ctx->deltaNList;
 
+    // Sizes of the two sets the delta is built on.  The gap between them is the
+    // whole basis of the pair-list idea in docs/delta-energy.md: nearly every
+    // atom in the changed set is there because its dielectric moved, not
+    // because it did.
+    static const bool g_setDiag = (getenv("PROTCAD_SETDIAG") != 0);
+    if (g_setDiag) {
+        static int shown = 0;
+        if (shown < 5) { shown++;
+            fprintf(stderr, "setdiag: N=%d changed=%d (%.1f%%) moved=%d (%.2f%%) "
+                            "tiles=%d/%d nCand=%d\n",
+                    N, count, 100.0*count/N, nMoved, 100.0*nMoved/N,
+                    nList, nT, nCand);
+        }
+    }
+
     // Seed every candidate from the resident conformation, then overwrite only
     // the changed atoms.  Both the original-order and sorted copies are seeded,
     // so the spatial order is inherited rather than rebuilt.

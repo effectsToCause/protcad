@@ -660,3 +660,86 @@ The first sweep showed kEnergy flat at 1035-1037 us across a 32x change in
 nCand, which would have been a spectacular result.  `minStopBench` has its own
 hardcoded `nCand = 32` and never read the environment override, so the sweep ran
 the same configuration six times.  The knob is now wired through to the bench.
+
+## Precision is already spent
+
+`ereal` is `float` unless the build defines `PROTCAD_ENERGY_FP64`, and nothing
+defines it.  The pair terms have been evaluated in single precision all along,
+so there is no precision lever left to pull.  Going below float is not
+available: `batchDeltaTest` gates at 5e-6 relative and currently sits at
+1.88e-06, which is roughly float epsilon accumulated over the sum.  Half
+precision would not survive the gate, and the 3090's TF32 path applies to
+tensor-core matmul, not to a pairwise kernel like this one.
+
+## What kEnergy actually spends its time on
+
+The assumption worth checking was that kEnergy is dominated by the physics --
+the LJ term, the electrostatics, the exclusion lookup, the square root.  It is
+not.  Ablating each in turn with a uniform branch on 1ake, 64 trials:
+
+    ablation                    kEnergy
+    none (real kernel)          1102.1 us
+    no exclusion lookup          917.0
+    no LJ                       1041.5
+    no electrostatics           1006.7
+    no sqrt                     1079.6
+    no LJ + no electrostatics    948.0
+    all of the above             772.0
+
+Deleting **every** arithmetic term in the pair loop buys 30%.  The other 70% is
+neighbour traversal: staging each j tile into shared memory, `boxBoxDist2`
+tile tests, and the `r2 >= cutSq` reject.  Counting directly, one batch delta
+call on 1ake examines ~56M candidate pairs and keeps ~7.5M of them -- **14.5%**.
+Six of every seven trips through the inner loop exist only to discover that two
+atoms are too far apart.
+
+(The ablation branches themselves cost about 6%: the real kernel measures 1032
+us without the harness and 1102 with it.  The harness is measurement-only and
+is not in the shipped kernel.  Only the loop-external `PROTCAD_SETDIAG` counter
+was kept.)
+
+## The pair list this points at
+
+The traversal is the cost, and the traversal is *candidate-invariant*.
+`PROTCAD_SETDIAG` on 1ake:
+
+    N=7814  changed=468  (6.0%)   moved=14  (0.18%)
+    N=7814  changed=920 (11.8%)   moved=24  (0.31%)
+    N=7814  changed=446  (5.7%)   moved=19  (0.24%)
+
+Nearly every atom in the changed set is there because its *dielectric* moved,
+not because it did: 14-24 atoms out of 450-920.  And staging only scatters the
+moved set, so every other atom holds bitwise identical coordinates in all 32
+candidate rows.  For a pair with neither endpoint moved -- which, at 0.2% moved,
+is essentially every pair -- these are all invariant across the batch:
+
+    r2, d, the exclusion code, the switch factor, and the entire LJ term
+
+and the electrostatic term varies only through `epsPair`, since
+
+    ele = (c_kc * qi * qj / d) / epsPair
+
+with the bracketed factor invariant.  So the batch currently rediscovers the
+same neighbour topology 32 times and recomputes the same LJ energy 32 times.
+
+The shape of the fix is to build, once per trial, a compacted list of surviving
+pairs holding the j index, the invariant electrostatic numerator, and the
+invariant LJ contribution, then have each candidate stream that dense list and
+do only a dielectric mix, a divide and an add.  This removes exactly the 70%
+that is traversal and the 85% of inner-loop trips that are rejects, because a
+compacted list has no rejects in it at all.
+
+Rough sizing on 1ake: ~227K surviving pairs per candidate row, so ~2.7 MB at
+three 4-byte fields per pair, built once and read 32 times.  The per-candidate
+pass becomes bandwidth-bound at roughly 2.7 MB, and the j-side dielectrics it
+gathers against are a few tens of KB and will sit in cache.  That projects to
+order 150 us against the present 1032, with the invariant LJ sum hoisted out of
+the candidate loop entirely.
+
+Determinism is not threatened and arguably improves: the list order is fixed for
+the trial and does not depend on nCand, so each thread still sums a contiguous
+range in a fixed order.  The `2*V1 - V2` double-count correction survives by
+storing the j-side cmask bit in the list entry.
+
+This has not been built.  It is the largest remaining lever in the delta path
+and it is a real kernel redesign, not a tuning change.
