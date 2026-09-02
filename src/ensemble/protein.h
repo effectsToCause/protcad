@@ -273,7 +273,8 @@ public:
 	                                 const std::vector<double>& _candZ,
 	                                 int _nCand, double _radius = 0.0,
 	                                 int* _movedOut = 0, double _tol = 1e-9,
-	                                 const std::vector<int>* _support = 0);
+	                                 const std::vector<int>* _support = 0,
+	                                 bool _coordsCurrent = false);
 	// Steepest descent over a candidate batch, evaluated as deltas against a
 	// held dielectric rather than as full energies.  _nbCurrent is the
 	// nonbonded part of the current total; the winner's nonbonded part and

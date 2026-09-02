@@ -1529,10 +1529,13 @@ int protein::updateDeviceCoords()
 
 	buildAtomIndex();
 	const int n = (int)itsAtomPtrs.size();
+	// getCoords returns a dblVec by value, so pulling N atoms through it was N
+	// heap allocations a trial -- 286 us on 1ake -- to read three doubles each.
+	// The component accessors read the same stored values with no copy.
 	for (int i = 0; i < n; i++)
 	{
-		dblVec coords = itsAtomPtrs[i]->getCoords();
-		itsCoordX[i] = coords[0]; itsCoordY[i] = coords[1]; itsCoordZ[i] = coords[2];
+		const atom* a = itsAtomPtrs[i];
+		itsCoordX[i] = a->getX(); itsCoordY[i] = a->getY(); itsCoordZ[i] = a->getZ();
 	}
 	return n;
 }
@@ -1555,8 +1558,8 @@ void protein::refreshDeviceCoords(const std::vector<int>& _atoms)
 	{
 		const int i = _atoms[k];
 		if (i < 0 || i >= (int)itsAtomPtrs.size()) {continue;}
-		dblVec coords = itsAtomPtrs[i]->getCoords();
-		itsCoordX[i] = coords[0]; itsCoordY[i] = coords[1]; itsCoordZ[i] = coords[2];
+		const atom* a = itsAtomPtrs[i];
+		itsCoordX[i] = a->getX(); itsCoordY[i] = a->getY(); itsCoordZ[i] = a->getZ();
 	}
 }
 
@@ -1823,9 +1826,16 @@ int protein::protThawDielectricForBatchCU(const vector<double>& _oldX,
                                           const vector<double>& _candZ,
                                           int _nCand, double _radius,
                                           int* _movedOut, double _tol,
-                                          const vector<int>* _support)
+                                          const vector<int>* _support,
+                                          bool _coordsCurrent)
 {
-	int N = updateDeviceCoords();
+	// The batch caller refreshed every coordinate immediately before building
+	// its candidates, and in the flat-transform path the residue object is
+	// never moved at all, so re-reading all N atoms out of the object graph
+	// here was a second full-N pass per trial to reproduce what itsCoord*
+	// already held.
+	int N = _coordsCurrent ? (int)itsCoordX.size() : updateDeviceCoords();
+	if (_coordsCurrent && (N == 0 || !itsEnergyContext)) {N = updateDeviceCoords();}
 	if (N == 0 || (int)_oldX.size() < N || _nCand <= 0) {return -1;}
 	if ((int)_candX.size() < (size_t)_nCand * N) {return -1;}
 	if (_radius <= 0.0)
@@ -1887,9 +1897,28 @@ int protein::protThawDielectricForBatchCU(const vector<double>& _oldX,
 		cr[m] = sqrt(r2) + _radius;
 	}
 
+	// Every one of those spheres sits inside one residue, so almost every atom
+	// in the structure misses all of them.  One sphere enclosing the lot turns
+	// that verdict into a single test instead of nMoved of them.  It only ever
+	// rejects -- anything it admits is still checked against each sphere -- so
+	// the thaw set is exactly the set the plain scan produces.
+	double ex = 0.0, ey = 0.0, ez = 0.0;
+	for (int m = 0; m < nMoved; m++) {ex += cx[m]; ey += cy[m]; ez += cz[m];}
+	ex /= nMoved; ey /= nMoved; ez /= nMoved;
+	double er = 0.0;
+	for (int m = 0; m < nMoved; m++)
+	{	const double dx = cx[m] - ex, dy = cy[m] - ey, dz = cz[m] - ez;
+		const double d = sqrt(dx*dx + dy*dy + dz*dz) + cr[m];
+		if (d > er) {er = d;} }
+	const double er2 = er * er;
+
 	vector<int> thaw;
 	for (int a = 0; a < N; a++)
 	{
+		{	const double dx = itsCoordX[a] - ex;
+			const double dy = itsCoordY[a] - ey;
+			const double dz = itsCoordZ[a] - ez;
+			if (dx*dx + dy*dy + dz*dz > er2) {continue;} }
 		bool hit = false;
 		for (int m = 0; m < nMoved && !hit; m++)
 		{
@@ -2131,7 +2160,7 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	const double _p2 = g_deltaProfOn ? profNow() : 0.0;
 	const int nThaw = protThawDielectricForBatchCU(oldX, oldY, oldZ, bx, by, bz,
 	                                               (int)_numCandidates, 0.0, &nMoved,
-	                                               1e-9, &resAtoms);
+	                                               1e-9, &resAtoms, true);
 	if (g_deltaProfOn) {g_deltaProf.t[2] += profNow() - _p2;}
 	if (nThaw <= 0) {return 1E30;}
 

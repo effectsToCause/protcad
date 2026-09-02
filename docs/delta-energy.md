@@ -488,3 +488,44 @@ stays at 5e-6 and the suite is 12/12.
 
 1ake over 512 trials: 2.24 -> 2.10 s wall.  1crn: 0.91 -> 0.82 s.
 `PROTCAD_HOSTCHI=1` restores the residue-object generator for A/B.
+
+## Two full-N host passes that did not need to happen
+
+With the transform dealt with, the two largest host phases on 1ake were setup
+at 286 us and thaw set construction at 423 us.  Both were paying for the same
+two mistakes.
+
+**`getCoords` returns a `dblVec` by value.**  `updateDeviceCoords` pulled all N
+atoms through it, so reading three doubles per atom cost a heap allocation per
+atom -- 7814 of them a trial on 1ake.  `point` already exposes `getX/getY/getZ`,
+which read the same stored values with no copy.  Same numbers, no allocator.
+
+**The thaw builder called `updateDeviceCoords` again.**  The batch caller
+refreshes every coordinate immediately before generating candidates, and in the
+flat-transform path the residue object is never moved at all, so the second
+full-N pass was reproducing what `itsCoord*` already held.  It now takes a
+`_coordsCurrent` flag from the one caller that has just done the work, and
+falls back to the refresh otherwise.
+
+**The sphere scan tested every atom against every moved atom's sphere.**  All of
+those spheres sit inside a single residue, so nearly every atom in the structure
+misses all of them, and O(N * nMoved) was spent proving it.  One enclosing
+sphere, computed from the others, rejects an atom in a single test.  It only
+ever rejects -- whatever it admits is still checked sphere by sphere -- so the
+thaw set is exactly the set the plain scan produced, which the unchanged 44.9%
+changed-set fraction and the bit-identical trajectories confirm.
+
+| phase (us/trial) | 1crn before | 1crn after | 1ake before | 1ake after |
+|---|---|---|---|---|
+| setup                  | 21 | 6.9 | 286 |  90 |
+| thaw set construction  | 30 | 12  | 423 |  45 |
+
+Per trial: 1crn 684 -> 654 us, 1ake 2748 -> 2206 us.  1ake over 512 trials went
+2.10 -> 1.80 s wall, 1crn 0.82 -> 0.78 s.
+
+Host bookkeeping on 1ake is now about 14% of a trial -- setup 84 us,
+`energySetCoords` 154 us, thaw 43 us, candidate generation 23 us -- against 85%
+in the batch delta itself, which is 58% `kEnergy`, 18% occupancy and 18%
+torsion.  The remaining host cost is the two full-N passes that are left, and
+neither can go away without deciding when the coordinate arrays may be trusted
+to be stale.  That is a correctness question, not a performance one.
