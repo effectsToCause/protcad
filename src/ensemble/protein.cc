@@ -1637,6 +1637,40 @@ int protein::buildRotationGroups()
 	itsRotGroupCount.assign(resPtr.size(), 0);
 	itsResRotIndex.assign(getNumChains(), vector<int>());
 
+	// Backbone phi/psi groups are opt-in, because they are only ever wanted for
+	// one thing. A phi rotation carries the whole downstream chain as a rigid
+	// body: in a folded protein that swings half the structure through the
+	// other half, so every proposal is rejected and the groups are dead weight
+	// on every sweep. In an unfolded reference peptide the downstream segment
+	// is a residue or two, and the move is precisely the backbone freedom the
+	// reference state is supposed to have and the folded state is not.
+	const char* bbEnv = getenv("PROTCAD_MC_BACKBONE");
+	const bool wantBackbone = (bbEnv && bbEnv[0] == '1');
+
+	// Global atom span of each residue, and of the chain it belongs to. The
+	// atomIterator walk above assigned global indices in (chain, residue, atom)
+	// order, so a residue's atoms are contiguous and "everything downstream in
+	// this chain" is an index range. It has to be built this way: the atom tree
+	// is linked only within a residue (see residue.cc), so collectDistal cannot
+	// reach past the backbone no matter where it starts.
+	vector<int> resAtomBegin(resPtr.size(), -1), resAtomEnd(resPtr.size(), -1);
+	for (UInt r = 0; r < resPtr.size(); r++)
+	{
+		for (UInt a = 0; a < localToGlobal[r].size(); a++)
+		{
+			int gi = localToGlobal[r][a];
+			if (gi < 0) {continue;}
+			if (resAtomBegin[r] < 0 || gi < resAtomBegin[r]) {resAtomBegin[r] = gi;}
+			if (gi + 1 > resAtomEnd[r]) {resAtomEnd[r] = gi + 1;}
+		}
+	}
+	vector<int> chainAtomEnd(resPtr.size(), -1);
+	for (int r = (int)resPtr.size() - 1, endOfChain = -1, cur = -2; r >= 0; r--)
+	{
+		if (resChain[r] != cur) {cur = resChain[r]; endOfChain = resAtomEnd[r];}
+		chainAtomEnd[r] = endOfChain;
+	}
+
 	for (UInt r = 0; r < resPtr.size(); r++)
 	{
 		UInt c = (UInt)resChain[r], rin = (UInt)resIndexInChain[r];
@@ -1646,7 +1680,7 @@ int protein::buildRotationGroups()
 		residue* pRes = resPtr[r];
 		UInt type = pRes->getTypeIndex();
 		int nChi = residue::dataBase[type].getNumberOfChis(0);
-		if (nChi <= 0) {continue;}
+		if (nChi <= 0 && !wantBackbone) {continue;}
 
 		itsRotGroupFirst[r] = (int)axisA.size();
 		for (int i = 0; i < nChi; i++)
@@ -1682,6 +1716,86 @@ int protein::buildRotationGroups()
 			memberStart.push_back((int)members.size());
 			itsRotGroupCount[r]++;
 		}
+
+		if (wantBackbone)
+		{
+			// phi (N->CA) and psi (CA->C). The device applies a rotation group
+			// as "spin these member atoms about this axis", with no notion of
+			// what the axis means, so the backbone needs no kernel support --
+			// only a member set that legitimately leaves the residue.
+			//
+			// The in-residue half still comes from the atom tree, which roots
+			// at N: distal-from-CA is the sidechain plus the carbonyl,
+			// distal-from-C is the carbonyl oxygen. The rest of the chain is
+			// appended as a range. Rotating about N-CA therefore carries the
+			// sidechain too, which is correct -- the sidechain is rigidly
+			// attached to CA, and holding N fixed is just a choice of which
+			// half of the molecule stays put.
+			int lN = -1, lCA = -1, lC = -1;
+			for (UInt a = 0; a < localToGlobal[r].size(); a++)
+			{
+				if (localToGlobal[r][a] < 0) {continue;}
+				string an = pRes->getAtomName(a);
+				if (an == "N") {lN = (int)a;} else if (an == "CA") {lCA = (int)a;}
+				else if (an == "C") {lC = (int)a;}
+			}
+
+			const int dsBegin = resAtomEnd[r], dsEnd = chainAtomEnd[r];
+			const bool isPro = (residue::dataBase[type].getName() == "PRO");
+
+			for (int which = 0; which < 2; which++)
+			{
+				// Proline's CD bonds back to N, so the ring closes across the
+				// phi axis. Rotating it would tear the ring open rather than
+				// change a torsion; phi is not a free coordinate in proline.
+				if (which == 0 && isPro) {continue;}
+				int la = (which == 0) ? lN : lCA;
+				int lb = (which == 0) ? lCA : lC;
+				if (la < 0 || lb < 0) {continue;}
+				int ga = localToGlobal[r][la], gb = localToGlobal[r][lb];
+				if (ga < 0 || gb < 0) {continue;}
+
+				vector<atom*> distal;
+				collectDistal(pRes->getAtom(lb), distal);
+
+				vector<int> gm; bool ok = true;
+				for (UInt d = 0; d < distal.size(); d++)
+				{
+					int gi = -1;
+					for (UInt a = 0; a < localToGlobal[r].size(); a++)
+					{
+						if (pRes->getAtom(a) == distal[d]) {gi = localToGlobal[r][a]; break;}
+					}
+					if (gi < 0) {ok = false; break;}
+					gm.push_back(gi);
+				}
+				// The axis atoms must not be carried by their own rotation, and
+				// the tree must have handed back the half we expected. If the
+				// residue is linked differently than assumed, skip the group
+				// rather than silently rotate the wrong set of atoms.
+				for (UInt m = 0; ok && m < gm.size(); m++)
+				{
+					if (gm[m] == ga || gm[m] == gb) {ok = false;}
+				}
+				if (which == 0 && ok)
+				{
+					bool carriesC = false;
+					for (UInt m = 0; m < gm.size(); m++) {if (gm[m] == localToGlobal[r][lC]) {carriesC = true;}}
+					if (lC >= 0 && !carriesC) {ok = false;}
+				}
+				if (!ok) {continue;}
+
+				for (int gi = dsBegin; gi < dsEnd; gi++) {gm.push_back(gi);}
+				if (gm.empty()) {continue;}
+
+				axisA.push_back(ga); axisB.push_back(gb);
+				for (UInt m = 0; m < gm.size(); m++) {members.push_back(gm[m]);}
+				memberStart.push_back((int)members.size());
+				itsRotGroupCount[r]++;
+			}
+		}
+
+		if (itsRotGroupCount[r] == 0) {itsRotGroupFirst[r] = -1;}
 	}
 
 	int nG = (int)axisA.size();
