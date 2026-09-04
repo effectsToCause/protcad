@@ -4,7 +4,7 @@
 # converged and the noise is a budget problem.  If it plateaus, each seed is
 # landing in a genuinely different minimum and no amount of budget fixes it.
 set -u
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0   # GPU 1 is the P2200 display card
 BIN=$HOME/protcad/bin
 PROT=${1:-1crn}
 : > conv_${PROT}.txt
