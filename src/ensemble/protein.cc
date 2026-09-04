@@ -2596,8 +2596,17 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 	// trajectories stay bit-identical.
 	double bbSpan = -1.0;
 	if (const char* bs = getenv("PROTCAD_MC_BBSPAN")) {bbSpan = atof(bs);}
+	// Step span for a sidechain chi, in degrees.  The generic 180/(distal chis)
+	// rule floors distal at 2, so the terminal chi of every residue -- the most
+	// common proposal -- always steps +/-90 degrees, and the finest move the
+	// generator can make anywhere is +/-45 (chi1 of a 4-chi Lys).  That is an
+	// exploration step sized to move the affected atoms ~2 A RMS; in a packed
+	// core it cannot refine a contact distance.  Negative keeps the legacy rule
+	// so default trajectories stay bit-identical.
+	double scSpan = -1.0;
+	if (const char* ss = getenv("PROTCAD_MC_SCSPAN")) {scSpan = atof(ss);}
 	vector <char> isBackboneGroup;
-	if (bbSpan > 0.0)
+	if (bbSpan > 0.0 || scSpan > 0.0)
 	{
 		isBackboneGroup.assign(nAllGroups, 0);
 		for (UInt r = 0; r < itsPhiGroup.size(); r++)
@@ -2676,8 +2685,12 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 
 				int distal = count - j; if (distal < 2) {distal = 2;}
 				double span = 180.0 / distal;
-				if (bbSpan > 0.0 && !isBackboneGroup.empty()
-				    && isBackboneGroup[(size_t)begin + j]) {span = bbSpan;}
+				if (!isBackboneGroup.empty())
+				{
+					const bool bb = isBackboneGroup[(size_t)begin + j] != 0;
+					if (bb  && bbSpan > 0.0) {span = bbSpan;}
+					if (!bb && scSpan > 0.0) {span = scSpan;}
+				}
 
 				double delta;
 				if ((rand() / (double)RAND_MAX) < hopFraction)
