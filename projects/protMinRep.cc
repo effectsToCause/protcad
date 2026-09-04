@@ -78,6 +78,22 @@ int main (int argc, char* argv[])
 	double endE = _prot->protEnergyCU();
 	cout << "Ending Energy: " << endE << " kcal/mol" << endl;
 	cout << "Delta: " << endE - startE << " kcal/mol" << endl;
+
+	// The ensemble block is the estimator that matters for a reference state.
+	// "Ending Energy" above is the best conformation seen, which is a biased
+	// summary of a canonical trajectory and gets worse the more torsions the
+	// residue has.
+	const protein::ensembleStats& es = _prot->getEnsembleStats();
+	if (es.valid)
+	{
+		cout << "--- ensemble (post burn-in) ---" << endl;
+		cout << "samples " << es.samples << "  torsions " << es.torsions << endl;
+		cout << "<E>: " << es.meanEnergy << " +/- " << es.sdEnergy << " kcal/mol" << endl;
+		cout << "minE: " << es.minEnergy << " kcal/mol" << endl;
+		cout << "S_conf: " << es.conformEntropy << " kcal/(mol K)" << endl;
+		cout << "T*S_conf: " << protein::Temperature() * es.conformEntropy << " kcal/mol" << endl;
+		cout << "A = <E> - T*S_conf: " << es.freeEnergy << " kcal/mol" << endl;
+	}
 	cout << "Wall: " << (t1 - t0) << " s" << endl;
 	if (sweeps && replicas)
 		cout << "Per-candidate: "

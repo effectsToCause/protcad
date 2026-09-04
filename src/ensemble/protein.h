@@ -344,6 +344,33 @@ public:
 	// sweep needs so a mixed set of residue types fits one rectangular array.
 	int maxRotationGroupCount() const;
 	// Fixed-budget population Monte Carlo over sidechain torsions.
+	// Ensemble statistics accumulated over the Metropolis trajectory.
+	//
+	// The MC loop is a correct canonical chain -- proposals are accepted with
+	// the Boltzmann criterion -- so the states it visits are distributed as
+	// exp(-E/kT).  Only the single lowest-energy conformation was ever
+	// reported, which discards that ensemble.  For a folded protein the
+	// minimum is a defensible summary; for an unfolded reference state it is
+	// exactly the wrong one, because the unfolded state is defined by the
+	// breadth of the distribution rather than its floor.  Worse, the size of
+	// the error scales with the number of accessible torsions, which is the
+	// very quantity a ddG is trying to resolve.
+	struct ensembleStats
+	{
+		bool   valid;            // false until a run has accumulated samples
+		UInt   samples;          // number of (sweep, replica) states counted
+		UInt   torsions;         // rotation groups histogrammed
+		double meanEnergy;       // <E> over the sampled trajectory
+		double sdEnergy;         // sqrt(<E^2> - <E>^2), the canonical fluctuation
+		double minEnergy;        // best conformation seen, the legacy estimator
+		double conformEntropy;   // S_conf in kcal/(mol K), from torsion occupancy
+		double freeEnergy;       // <E> - T*S_conf
+		ensembleStats() : valid(false), samples(0), torsions(0), meanEnergy(0.0),
+		                  sdEnergy(0.0), minEnergy(0.0), conformEntropy(0.0),
+		                  freeEnergy(0.0) {}
+	};
+	const ensembleStats& getEnsembleStats() const {return itsEnsembleStats;}
+
 	void protMinReplicaCU(UInt _sweeps, UInt _nReplicas);
 	// Number of disulfide cross-links removed from the nonbonded sum.
 	int getDisulfideCount() const {return itsDisulfideCount;}
@@ -506,6 +533,7 @@ private:
 	bool deviceMemLoadedEnergy = false;
 	bool deviceMemLoadedClash = false;
 	bool deviceMemLoadedAll = false;
+	ensembleStats itsEnsembleStats;
 	
 	//--Buffering
 	int itsLastModifiedChain;
