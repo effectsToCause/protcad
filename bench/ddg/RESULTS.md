@@ -164,3 +164,66 @@ Next lever, replacing "add a nonpolar SASA term": soften the repulsive wall
 (exp-6, or a soft-core). This is also the standard fix for the endpoint
 singularity in alchemical free energy, which is exactly what X->Ala is, and it
 is the same wall behind the 3e5 kcal/mol blowups from 0.001 A pairs.
+
+## Settled negative: the repulsive wall is not what inflates ddG
+
+The section above nominates softening the wall as the next lever. It was
+implemented (exp-6 and soft-core, bf200af) and measured. **It does not work.**
+
+Two arms, identical binaries and identical budgets (36000 sweeps, 8 seeds, 32
+replicas, rigid folded backbone), differing only in PROTCAD_VDW_WALL. Each arm
+got its own unfolded reference, because dA_unfolded is wall-dependent and
+carrying the LJ values across would have manufactured the answer.
+
+| site | lj dA_f | exp6 dA_f | lj dA_u | exp6 dA_u | lj ddG | exp6 ddG |
+|---|---|---|---|---|---|---|
+| I6A  | -11.54 | -11.77 | -16.91 | -16.42 |  5.37 |  4.65 |
+| L17A |   2.96 |  -0.92 | -13.71 | -13.28 | 16.67 | 12.36 |
+| Y28A |   6.40 |   8.32 | -12.88 | -11.59 | 19.28 | 19.91 |
+
+Target is 2-5 kcal/mol for a buried hydrophobic deletion. exp-6 brings L17A
+down 4.3 but leaves it 2.5x high, moves Y28A not at all, and only preserves
+I6A, which was already in range. The pre-registered readout was "L17A and Y28A
+come down toward 2-5 with all three signs positive". Signs held; magnitudes did
+not. The arm fails.
+
+Autopsy. exp-6 did what it was built to do -- anharmonicity over the thermal
+amplitude falls from 135x above harmonic to 5.0x -- and ddG barely responded.
+That is the informative part. If r^-12 were setting the magnitude, all three
+sites would have moved down together, roughly in proportion to buried contact
+area. Instead the responses have different signs and no common scale. The 3-4x
+error is therefore not stored in the shape of the repulsive wall.
+
+It also costs precision: sd(dA_folded) goes from 0.53-0.60 under lj to
+0.76-1.13 under exp-6, as a flatter landscape admits more basin diversity.
+Nothing bought, precision spent. **Default stays lj.** exp-6 and soft-core are
+retained as lambda-path devices, which is what soft-core was already reduced to
+(see bf200af for why it is disqualified as an endpoint Hamiltonian).
+
+Where the error must live instead. The unfolded leg is precise to sd 0.02-0.06
+-- a tripeptide converges hard -- so both the noise and the inflation sit
+entirely on the folded side. The residual ordering is Tyr > Leu >> Ile, which
+tracks sidechain size and burial rather than wall stiffness. Combined with the
+solvation correction above (all three solvation terms are live, and large),
+that points at the balance between the solvation terms, not at vdW. The
+type-specific solvent-entropy coefficient is the next arm.
+
+Also settled, secondarily: I6A's negative dA_folded is not a wall artefact. The
+standing explanation was a strained Ile6 template rotamer releasing spurious
+clash energy, which predicts the anomaly softens as the wall softens. It does
+not move at all (-11.54 -> -11.77). That explanation is dead; the anomaly is
+still unexplained.
+
+### Provenance note on the unfolded leg
+
+The dA_unfolded values in the uncalibrated-ddG table further up were produced by
+a build_gxg.py that was never committed and is now gone from disk; only its
+.pyc survived, in git. The leg has been rebuilt on protBuild as ddg_unfolded.sh.
+It reproduces the lost script to better than 0.1 kcal/mol for ALA, ILE and LEU
+(-16.91 vs -17.00, -13.71 vs -13.78).
+
+TYR does not reproduce: -12.88 here against -10.57 committed. sd is 0.03, so
+this is a real difference in method, not noise, and TYR was likewise the outlier
+in a crude smoke test. The exp6-vs-lj comparison above is unaffected, since both
+arms use this same leg, but the absolute Y28A ddG should be held loosely until
+the discrepancy is explained.
