@@ -1635,6 +1635,10 @@ int protein::buildRotationGroups()
 	memberStart.push_back(0);
 	itsRotGroupFirst.assign(resPtr.size(), -1);
 	itsRotGroupCount.assign(resPtr.size(), 0);
+	itsPhiGroup.assign(resPtr.size(), -1);
+	itsPsiGroup.assign(resPtr.size(), -1);
+	itsRotResChain.assign(resPtr.size(), -1);
+	for (UInt r = 0; r < resPtr.size(); r++) {itsRotResChain[r] = resChain[r];}
 	itsResRotIndex.assign(getNumChains(), vector<int>());
 
 	// Backbone phi/psi groups are opt-in, because they are only ever wanted for
@@ -1788,6 +1792,8 @@ int protein::buildRotationGroups()
 				for (int gi = dsBegin; gi < dsEnd; gi++) {gm.push_back(gi);}
 				if (gm.empty()) {continue;}
 
+				if (which == 0) {itsPhiGroup[r] = (int)axisA.size();}
+				else            {itsPsiGroup[r] = (int)axisA.size();}
 				axisA.push_back(ga); axisB.push_back(gb);
 				for (UInt m = 0; m < gm.size(); m++) {members.push_back(gm[m]);}
 				memberStart.push_back((int)members.size());
@@ -2485,8 +2491,12 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 		return;
 	}
 
-	const int stride = maxRotationGroupCount();
-	if (stride <= 0) {return;}
+	// The crankshaft proposal spans psi of one residue through phi of the next,
+	// which brackets the intervening residue's chis, so a row must hold more
+	// than one residue's worth of groups.  Two extra slots covers it: the span
+	// is 1 + nChi(i+1) + 1 and nChi is bounded by the per-residue maximum.
+	const int stride = maxRotationGroupCount() + 2;
+	if (stride <= 2) {return;}
 
 	// Note on throughput: per-candidate cost rises over a long run (116 us at
 	// 2000 sweeps to 187 us at 20000 on 1crn). This is not a defect. It was
@@ -2529,6 +2539,74 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 	if (const char* h = getenv("PROTCAD_MC_HOP")) {hopFraction = atof(h);}
 	bool allChi = false;
 	if (const char* pm = getenv("PROTCAD_MC_PROPOSAL")) {allChi = (string(pm) == "allchi");}
+	// PROTCAD_MC_CRANKSHAFT  fraction of backbone trials that rotate psi_i and
+	//                        phi_{i+1} by equal and opposite amounts instead of
+	//                        pivoting a single torsion.
+	//
+	// A lone phi or psi swings the whole downstream chain as a rigid body,
+	// which in a folded protein drives it through the rest of the structure.
+	// Coupling psi_i to phi_{i+1} with opposite sign turns most of that swing
+	// back.  Measured on an ideal 20-mer, downstream displacement per degree of
+	// proposal is 0.172 A for phi alone, 0.031 A for the coupled pair -- a
+	// factor of 5.5.  Coupling phi_i to psi_i of the SAME residue, which
+	// conserves phi+psi and so preserves helical pitch, is worse than either
+	// (0.217 A/deg): pitch conservation is not locality.
+	//
+	// The pair does not close exactly.  Residual displacement is strictly
+	// linear in the step (0.0313 A/deg from 1 to 20 degrees) and the optimal
+	// ratio is conformation dependent (0.825 in helix, 1.170 in sheet), because
+	// exact closure under rigid geometry needs six torsions.  That costs
+	// acceptance, not correctness: the proposal is symmetric under negating the
+	// step, so detailed balance holds regardless of how local it is.
+	double crankFraction = 0.0;
+	if (const char* cs = getenv("PROTCAD_MC_CRANKSHAFT")) {crankFraction = atof(cs);}
+	if (crankFraction < 0.0) {crankFraction = 0.0;}
+	if (crankFraction > 1.0) {crankFraction = 1.0;}
+	// Coupling ratio applied to phi_{i+1} relative to psi_i.  Exposed because
+	// the sign that makes the pair local depends on the device's rotation
+	// convention, which is not worth deducing when it can be measured.
+	double crankRatio = -1.0;
+	if (const char* cr = getenv("PROTCAD_MC_CRANKRATIO")) {crankRatio = atof(cr);}
+	// Step scale for the coupled move, as a fraction of the +/-90 deg single
+	// pivot span.  A more local move can afford a larger step, but that has to
+	// be tuned against measured acceptance rather than assumed.
+	double crankSpan = 90.0;
+	if (const char* cw = getenv("PROTCAD_MC_CRANKSPAN")) {crankSpan = atof(cw);}
+
+	// Residues whose psi can pair with the next residue's phi.
+	vector <int> crankRes;
+	if (crankFraction > 0.0)
+	{
+		for (UInt r = 0; r + 1 < itsPsiGroup.size(); r++)
+		{
+			if (itsPsiGroup[r] < 0 || itsPhiGroup[r + 1] < 0) {continue;}
+			if (itsRotResChain[r] != itsRotResChain[r + 1]) {continue;}
+			if (itsPhiGroup[r + 1] - itsPsiGroup[r] + 1 > stride) {continue;}
+			crankRes.push_back((int)r);
+		}
+	}
+
+	// Step span for a lone phi or psi pivot, in degrees.  The generic rule
+	// below is 180/(groups distal within the residue), which for a backbone
+	// group is always 180/2 = 90 no matter how much chain hangs off it.  That
+	// is sized for a sidechain tip, not for a torsion that swings half a
+	// protein: measured downstream displacement is 0.172 A per degree, so a
+	// 90 degree step moves the distal chain by tens of angstroms and is
+	// rejected essentially always.  Negative keeps the legacy rule so default
+	// trajectories stay bit-identical.
+	double bbSpan = -1.0;
+	if (const char* bs = getenv("PROTCAD_MC_BBSPAN")) {bbSpan = atof(bs);}
+	vector <char> isBackboneGroup;
+	if (bbSpan > 0.0)
+	{
+		isBackboneGroup.assign(nAllGroups, 0);
+		for (UInt r = 0; r < itsPhiGroup.size(); r++)
+		{
+			if (itsPhiGroup[r] >= 0) {isBackboneGroup[itsPhiGroup[r]] = 1;}
+			if (itsPsiGroup[r] >= 0) {isBackboneGroup[itsPsiGroup[r]] = 1;}
+		}
+	}
+
 	if (const char* sd = getenv("PROTCAD_MC_SEED")) {srand((unsigned)atoi(sd));}
 	else {srand(time(NULL));}
 
@@ -2563,6 +2641,20 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 			for (int g = 0; g < stride; g++) {angles[(size_t)k * stride + g] = 0.0;}
 			groupBegin[k] = 0; nGroups[k] = 0;
 
+			if (!crankRes.empty() && (rand() / (double)RAND_MAX) < crankFraction)
+			{
+				int r = crankRes[rand() % crankRes.size()];
+				int gPsi = itsPsiGroup[r], gPhi = itsPhiGroup[r + 1];
+				int span = gPhi - gPsi + 1;
+				// Same span as a single pivot uses, so the two proposals are
+				// compared at matched step size rather than matched locality.
+				double d = 2.0 * crankSpan * (rand() / (double)RAND_MAX - 0.5);
+				groupBegin[k] = gPsi; nGroups[k] = span;
+				angles[(size_t)k * stride + 0] = d;
+				angles[(size_t)k * stride + (span - 1)] = crankRatio * d;
+				continue;
+			}
+
 			// Pick a residue that actually has rotatable chis. Glycine and
 			// alanine are common enough that rejection sampling needs a bound.
 			int begin = 0, count = 0;
@@ -2583,7 +2675,9 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 				if (!allChi && j != jFixed) {continue;}
 
 				int distal = count - j; if (distal < 2) {distal = 2;}
-				const double span = 180.0 / distal;
+				double span = 180.0 / distal;
+				if (bbSpan > 0.0 && !isBackboneGroup.empty()
+				    && isBackboneGroup[(size_t)begin + j]) {span = bbSpan;}
 
 				double delta;
 				if ((rand() / (double)RAND_MAX) < hopFraction)

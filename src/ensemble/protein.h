@@ -528,6 +528,10 @@ private:
 	// so anything left over from the previous trial is unreachable.
 	std::vector<double> itsBatchX, itsBatchY, itsBatchZ;
 	std::vector<int> itsRotGroupFirst, itsRotGroupCount;   // per residue, walk order
+	// Backbone group index per residue, -1 when absent (proline has no free
+	// phi).  Needed by the crankshaft proposal, which pairs psi of one residue
+	// with phi of the next and so cannot work from a per-residue range alone.
+	std::vector<int> itsPhiGroup, itsPsiGroup, itsRotResChain;
 	std::vector< std::vector<int> > itsResRotIndex;        // [chain][resInChain] -> walk index
 	double E;
 	int clash;
