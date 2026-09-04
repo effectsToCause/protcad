@@ -281,6 +281,44 @@ const char* energyLastError(energyContext* ctx)
 // Parameter presets
 // ---------------------------------------------------------------------------
 
+// Inner maximum of the Buckingham exp-6 form, in units of rm: the root below
+// x=1 of -7*ln(x) = alpha*(1-x).  Bisection on [1e-3, 0.999] is ample -- this
+// runs once per parameter construction, not per pair.
+static double exp6InnerMax(double alpha)
+{
+    if (alpha <= 6.0) return 0.0;
+    double lo = 1e-3, hi = 0.999;
+    // f(x) = x^-7 - exp(alpha*(1-x)); positive inside the peak, negative outside.
+    for (int it = 0; it < 200; ++it)
+    {
+        double mid = 0.5 * (lo + hi);
+        double f = pow(mid, -7.0) - exp(alpha * (1.0 - mid));
+        if (f > 0.0) lo = mid; else hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+// Apply the PROTCAD_VDW_* overrides.  Default is VDW_LJ_12_6 with both extra
+// parameters inert, so an unset environment leaves every trajectory
+// bit-identical to before this existed.
+static void applyVdwWallEnv(energyParams& p)
+{
+    p.vdwWall      = VDW_LJ_12_6;
+    p.vdwAlpha     = 14.0;
+    p.vdwSoftDelta = 0.0;
+    p.vdwExp6Xmax  = 0.0;
+
+    if (const char* w = getenv("PROTCAD_VDW_WALL"))
+    {
+        if      (!strcmp(w, "exp6"))     p.vdwWall = VDW_EXP_6;
+        else if (!strcmp(w, "softcore")) p.vdwWall = VDW_SOFTCORE;
+        else if (!strcmp(w, "lj"))       p.vdwWall = VDW_LJ_12_6;
+    }
+    if (const char* a = getenv("PROTCAD_VDW_ALPHA"))      p.vdwAlpha     = atof(a);
+    if (const char* d = getenv("PROTCAD_VDW_SOFTDELTA"))  p.vdwSoftDelta = atof(d);
+    if (p.vdwWall == VDW_EXP_6) p.vdwExp6Xmax = exp6InnerMax(p.vdwAlpha);
+}
+
 energyParams defaultEnergyParams()
 {
     energyParams p;
@@ -337,6 +375,7 @@ energyParams defaultEnergyParams()
     p.clashTolerance = 0.905;
 
     p.exclusionResidueSpan = 2;
+    applyVdwWallEnv(p);
     return p;
 }
 
@@ -360,6 +399,7 @@ energyParams legacyEnergyParams()
     p.torsionScale = 0.0;
     p.elec14Scale  = 0.0;
     p.vdw14Scale   = 0.0;
+    applyVdwWallEnv(p);
     return p;
 }
 
@@ -381,6 +421,7 @@ __device__ __forceinline__ ereal eabs(ereal a)   { return fabs(a); }
 __device__ __forceinline__ ereal etrunc(ereal a) { return trunc(a); }
 __device__ __forceinline__ ereal ecos(ereal a)   { return cos(a); }
 __device__ __forceinline__ ereal eatan2(ereal a, ereal b) { return atan2(a, b); }
+__device__ __forceinline__ ereal eexp(ereal a)   { return exp(a); }
 #else
 __device__ __forceinline__ ereal esqrt(ereal a)  { return sqrtf(a); }
 __device__ __forceinline__ ereal emax(ereal a, ereal b) { return fmaxf(a, b); }
@@ -389,6 +430,7 @@ __device__ __forceinline__ ereal eabs(ereal a)   { return fabsf(a); }
 __device__ __forceinline__ ereal etrunc(ereal a) { return truncf(a); }
 __device__ __forceinline__ ereal ecos(ereal a)   { return cosf(a); }
 __device__ __forceinline__ ereal eatan2(ereal a, ereal b) { return atan2f(a, b); }
+__device__ __forceinline__ ereal eexp(ereal a)   { return expf(a); }
 #endif
 
 __device__ __forceinline__ ereal cube(ereal a) { return a * a * a; }
@@ -421,6 +463,33 @@ __device__ __forceinline__ ereal switchFn(ereal d2, ereal d0sq, ereal d1sq)
     if (d2 >= d1sq) return ereal(0);
     ereal u = (d1sq - d2) / (d1sq - d0sq);
     return u * u * (ereal(3) - ereal(2) * u);
+}
+
+// Repulsive wall.  Returns energy in units of the pair well depth, i.e. the
+// caller multiplies by sqrt(epsI*epsJ).  ratio2 = (rm/r)^2 with rm = radI+radJ,
+// so all three forms share a minimum of -1 at ratio2 == 1.
+__device__ __forceinline__ ereal vdwEnergy(ereal ratio2, const energyParams& p)
+{
+    if (p.vdwWall == VDW_EXP_6)
+    {
+        // x = r/rm.  Clamped at the inner maximum, where the -r^-6 term starts
+        // to outrun the saturating exponential and the Buckingham form dives to
+        // -inf.  Everything inside that radius returns the peak value, which is
+        // the same flat-and-huge treatment minSeparation already gives 1/r.
+        const ereal x = emax(ereal(1) / esqrt(ratio2), ereal(p.vdwExp6Xmax));
+        const ereal a = p.vdwAlpha;
+        const ereal xi6 = ereal(1) / (x * x * x * x * x * x);   // (rm/r)^6
+        return (ereal(6) * eexp(a * (ereal(1) - x)) - a * xi6) / (a - ereal(6));
+    }
+    if (p.vdwWall == VDW_SOFTCORE)
+    {
+        // u = 1/(delta + (r/rm)^6).  delta = 0 recovers 12-6 identically.
+        const ereal x6 = ereal(1) / (ratio2 * ratio2 * ratio2);  // (r/rm)^6
+        const ereal u = ereal(1) / (p.vdwSoftDelta + x6);
+        return u * u - ereal(2) * u;
+    }
+    const ereal r6 = ratio2 * ratio2 * ratio2;
+    return r6 * r6 - ereal(2) * r6;
 }
 
 // Convert free shell volume to a local dielectric.  Shared by the pair loop and
@@ -1064,8 +1133,7 @@ __global__ void kEnergy(int nTiles,
                 // cheaper than two calls to pow().
                 ereal rsum = ri + shR[base + k];
                 ereal ratio2 = (rsum * rsum) / r2;
-                ereal r6 = ratio2 * ratio2 * ratio2;
-                ereal vdw = ei * shE[base + k] * (r6 * r6 - ereal(2) * r6);
+                ereal vdw = ei * shE[base + k] * vdwEnergy(ratio2, p);
 
                 ereal epsPair = mixDielectric(si.eps, shD[base + k], p.pairMixing);
                 ereal ele = c_kc * qi * shQ[base + k] / (d * epsPair);

@@ -95,6 +95,32 @@ enum clashModel
     CLASH_SPHERE = 1
 };
 
+// Shape of the repulsive wall.  All three share the same minimum: depth
+// -sqrt(epsI*epsJ) at r = radI + radJ.  They differ only inside it.
+enum vdwWallModel
+{
+    // eps*((rm/r)^12 - 2*(rm/r)^6).  r^-12 was chosen because it is the square
+    // of r^-6, not for physics, and it has no shoulder near its zero crossing:
+    // the only inflection is at 1.109*rm, on the attractive side beyond the
+    // minimum.  Measured consequence is a surface 256x stiffer than harmonic at
+    // 0.3 A displacement, while 1crn's B-factors put its RMSF at 0.296 A.
+    VDW_LJ_12_6 = 0,
+
+    // Buckingham exp-6, the physical form: exchange repulsion is exponential.
+    //   eps*( 6/(a-6)*exp(a*(1 - r/rm)) - a/(a-6)*(rm/r)^6 )
+    // Softer than r^-12 at contact.  It inverts at small r, where the -r^-6
+    // term outruns the saturating exponential, so it is clamped at its inner
+    // maximum; see vdwEnergy.
+    VDW_EXP_6 = 1,
+
+    // Beutler soft-core, the standard alchemical endpoint regulariser:
+    //   eps*( 1/(d + (r/rm)^6)^2 - 2/(d + (r/rm)^6) )
+    // Finite at r=0, monotone, no inversion to guard.  d=0 recovers 12-6
+    // exactly.  X->Ala is an endpoint deletion, which is the problem this form
+    // was designed for.
+    VDW_SOFTCORE = 2
+};
+
 // ---------------------------------------------------------------------------
 // Parameters
 // ---------------------------------------------------------------------------
@@ -192,6 +218,15 @@ struct energyParams
     // --- global scaling, mirrors the CPU path ---
     double vdwScale;
     double elecScale;
+
+    // --- repulsive wall shape ---
+    int    vdwWall;        // vdwWallModel; VDW_LJ_12_6 is the default
+    double vdwAlpha;       // exp-6 steepness, 12-16 typical, 14 default
+    double vdwSoftDelta;   // soft-core offset; 0 reproduces 12-6 exactly
+    // Inner maximum of the exp-6 form in units of rm, the root of
+    // -7*ln(x) = alpha*(1-x) below x=1.  Solved on the host whenever vdwAlpha
+    // is set so the kernel never has to iterate.
+    double vdwExp6Xmax;
 
     // --- bonded ---
     // Scale on the whole dihedral term.  Zero reproduces the behaviour before
