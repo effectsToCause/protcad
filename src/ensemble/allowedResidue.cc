@@ -72,12 +72,6 @@ void allowedResidue::setRotamerNotAllowed(const UInt _bpt,const UInt _rot)
 	}
 }
 
-UInt allowedResidue::getRotamerLibSize(const UInt _bpt) const
-{	if (_bpt < itsAllowedRotamers.size())
-	{	return itsAllowedRotamers[_bpt].size();
-	}
-	return 0;
-}
 
 int allowedResidue::chooseRotamerFromLibrary(const UInt _bpt, ran& _ran) const
 {	if (itsAllowedRotamers.size() != 0 )
@@ -144,14 +138,6 @@ void allowedResidue::deleteRotamer(const UInt _bpt, const UInt _index)
 	}
 }
 
-int allowedResidue::getRotamerFromIndex(const UInt _bpt, const UInt _index) const
-{	if (_bpt < itsAllowedRotamers.size())
-	{	if (_index < itsAllowedRotamers[_bpt].size())
-		{	return itsAllowedRotamers[_bpt][_index];
-		}
-	}
-	return -1;
-}
 
 void allowedResidue::setCurrentRotamerIndex(const UInt _rotamerIndex)
 {

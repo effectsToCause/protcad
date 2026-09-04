@@ -74,12 +74,9 @@ public:
 	                         const vector<dblVec>& _nativeCoord);
 	void rebuildResiduesInChain();
 	bool isDAminoAcid(residue* currentRes);
-	void redoModification(chainModBuffer _redoBuffer);
 	void makeAtomSilent(const UInt _resIndex, const UInt _atomIndex);
 	void makeResidueSilent(const UInt _resIndex);
 	int getLastModificationPosition() { return itsLastTargetResidue; }
-	void randomizeSystem(ran& _ran);
-	void makeAllAlanine();
     void removeResidue(UInt _resNum);
 	bool isCofactor(UInt resIndex){return itsResidues[resIndex]->isCofactor();}  
 
@@ -97,7 +94,6 @@ public:
 	vector<chainModBuffer> saveCurrentState(vector <int> _position);
 	void commitState();
 	void undoState();
-	void copyState(vector <chainModBuffer> _externalBuffer);
 
 	void commitLastMutation();
 	void commitLastRotamerChange();
@@ -113,7 +109,6 @@ public:
 	void listSecondaryStructure() const;
 	void listDihedrals();
 	void listAllowedRotamers(UInt _indexInChain) const;
-	void listChiDefinitions() const;
 	UInt getNumChis(const UInt _resIndex, const UInt _bpt);
 	double netCharge();
 	vector <dblVec> saveCoords(UInt resIndex);
@@ -150,8 +145,6 @@ public:
 		{ return itsResidues[_resIndex]->getChi(_bpt, _chi); }
 	void setChi(const UInt _resIndex, const UInt _bpt, const UInt _chi, const double _angle)
 		{ itsResidues[_resIndex]->setChi(_bpt, _chi, _angle); }
-	void setDihedrals(UInt _resIndex, UInt _bpt, vector <double> _dihedrals);
-	vector < vector <double> >  getDihedrals(UInt _resIndex) {return itsResidues[_resIndex]->getSidechainDihedralAngles() ;}
 	void setDihedralWithBuffering(const UInt _indexInChain, const UInt _bpt, const UInt _dihedralIndex, const double _dihedralAngle);
 	void setDihedralWithoutBuffering(const UInt _indexInChain, const UInt _bpt, const UInt _dihedralIndex, const double _dihedralAngle);
 	vector< vector< double> > getSidechainDihedralAngles(UInt _indexInChain);
@@ -183,10 +176,6 @@ private:
 
 public:
 
-	dblVec getSpaceLink() { return itsSpaceLink; }
-	void setSpaceLink(const dblVec& _relation) { itsSpaceLink = _relation; }
-	dblVec getSpinLink() {return itsSpinLink; }
-	void setSpinLink(const dblVec& _relation) {itsSpaceLink = _relation; }
 
 	void translate(const dblVec& _dblVec);
 	void translate(const double _x, const double _y, const double _z);
@@ -215,7 +204,6 @@ public:
 	void updateMovedDependence(chain* _other, UInt _EorC);
 	double getEnergy();
 
-	double getPositionInterSoluteEnergy(vector<int> _position, chain* _other);
 
 	double getVolume(UInt _method);
 

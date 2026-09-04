@@ -34,11 +34,9 @@ public:
 	int mutate(vector <int> _position, UInt _resType);
 	int mutateWithSymmetry(vector <int> _position, UInt _resType);
 
-	int symmetryLinkMolAndChain(UInt _molecule1, UInt _chain1, UInt _molecule2, UInt _chain2);
 	void printLinkageInfo();
 
         molecule * getMoleculePointer(UInt _index);
-        UInt getNumMolecules(){return itsMolecules.size();}
 	vector <int> getLastModification();
 	vector <int> chooseNextTargetPosition(ran& _ran);
 	UInt chooseNextMutationIdentity(ran& _ran, vector <int> _position);

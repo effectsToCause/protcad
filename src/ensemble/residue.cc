@@ -1871,23 +1871,6 @@ double residue::getBetaChi()
 	return 1000.0;
 }
 
-double residue::getBetaChiR()
-{
-	if(itsAtoms.size() > 4)
-	{
-		if(pItsNextRes != 0 && (itsAtoms[4]->getName() == "CB" || itsAtoms[4]->getName() == "CD"))
-		{
-			vector< dblVec > quadVect(4);
-			quadVect[0] = pItsNextRes->getMainChain(0)->getCoords();
-			quadVect[1] = itsAtoms[2]->getCoords();
-			quadVect[2] = itsAtoms[1]->getCoords();
-			if (itsType == 19) {quadVect[3] = itsAtoms[6]->getCoords();} //proline beta carbon in reverse bond order
-			else{quadVect[3] = itsAtoms[4]->getCoords();}
-			return CMath::dihedral(quadVect[0], quadVect[1], quadVect[2], quadVect[3]);
-		}
-	}
-	return 1000.0;
-}
 
 double residue::calculateDihedral(const vector<UInt>& _quad) const
 {	if( _quad.size() != 4)
@@ -2126,18 +2109,6 @@ double residue::getOmega()
 	return tempdouble;
 }
 
-void residue::setOmega(double _omega)
-{
-	if (pItsNextRes != 0)
-	{
-		UInt i = dataBase[itsType].mainChain.size()-1;
-		double currentOmega = getOmega();
-		ASSERT(currentOmega < 1e5 && currentOmega > -1e5);
-		double angle = _omega - currentOmega;
-		rotate(getMainChain(i-3), getMainChain(i-2), angle, false);
-	}
-	return;
-}
 
 double residue::getAmide()
 {
@@ -2306,14 +2277,6 @@ dblVec residue::getCoords(const string _atomName)
     return coords;
 }
 
-void residue::printCoords() const
-{	for (UInt i=0; i<itsAtoms.size(); i++)
-	{	cout << itsAtoms[i]->getName() << ' ';
-		cout << itsAtoms[i]->getX() << ' ';
-		cout << itsAtoms[i]->getY() << ' ';
-		cout << itsAtoms[i]->getZ() << endl;
-	}
-}
 
 void residue::rotate(UInt _first, UInt _second, double _theta)
 {	bool backboneRotation = false;
@@ -3216,46 +3179,6 @@ bool residue::isSeparatedByThreeBackboneBonds(UInt _index1, residue* _pRes2, UIn
 	return false;
 }
 
-bool residue::isSeparatedByOneOrTwoBackboneBonds(UInt _index1, residue* _pRes2, UInt _index2)
-{
-	// first, check if they are sequential residues
-	int theOrder = 0;
-	// is _pRes1 the residue N-terminal to _pRes2?
-	if ( this == _pRes2->getPrevRes())
-		theOrder = 1;
-	// if _pRes1 the residue C-terminal to _pRes2?
-	if ( this == _pRes2->getNextRes())
-		theOrder = -1;
-	if (theOrder == 0)
-	{
-		return false;
-	}
-	string name1, name2;
-	UInt atom1, atom2;
-	if (theOrder == -1){
-		name2 = itsAtoms[_index1]->getName(); // c terminal
-		name1 = _pRes2->itsAtoms[_index2]->getName(); //n terminal
-		atom2 = _index1;
-		atom1 = _index2;
-	}
-	else{
-		name1 = itsAtoms[_index1]->getName(); // n terminal
-		name2 = _pRes2->itsAtoms[_index2]->getName(); // c terminal
-		atom1 = _index1;
-		atom2 = _index2;
-	}
-
-	if (atom2 == 0 || atom2 == 1 || name2 == "H")
-	{
-		if (atom1 > 0 && atom1 < 4){
-			if ((name2 == "H" || atom2 == 1) && atom1 == 2){return true;}
-			if (atom2 == 0) {return true;}
-			return false;
-		}
-		else{return false;}
-	}
-	else{return false;}
-}
 
 
 bool residue::isSeparatedByOneOrTwoBonds(UInt _index1, residue* _pRes2, UInt _index2)
@@ -3821,15 +3744,6 @@ UInt residue::getBondSeparation(residue* _pRes1, UInt _index1, residue*
     return numBonds;
 }
 
-bool residue::notHydrogen(UInt _atomIndex)
-{
-	string atomType = getTypeStringFromAtomNum(_atomIndex);
-	if (atomType != "H")
-	{
-		return true;
-	}
-	return false;
-}
 
 
 bool residue::isBonded(UInt _index1, UInt _index2)
@@ -4130,36 +4044,6 @@ double residue::wodakVolume()
 	return volume;
 }
 
-double residue::configurationEntropy()
-{	// simplest model implemented right now -> KT*log(b*r) same formula as solvent entropy
-	// b = number of RPT backbone bins in PDB which have a potential less than zero for given residue
-	// r = total number of possible rotamers
-	double Entropy = 0.0;
-	double kt = temperature*KB;
-	string residueType = getDataBaseItem(itsType);
-	if (residueType == "ALA" || residueType == "ALD") 													{Entropy = (kt*log(4*1))*EntropyFactor; return Entropy;}
-	if (residueType == "ARG" || residueType == "ARD") 													{Entropy = (kt*log(5*81))*EntropyFactor; return Entropy;}
-	if (residueType == "ASN" || residueType == "AND") 													{Entropy = (kt*log(8*9))*EntropyFactor; return Entropy;}
-	if (residueType == "ASP" || residueType == "APD" || residueType == "ASH" || residueType == "AHD") 	{Entropy = (kt*log(9*9))*EntropyFactor; return Entropy;}
-	if (residueType == "CYS" || residueType == "CYD" || residueType == "CYX" || residueType == "CXD") 	{Entropy = (kt*log(5*3))*EntropyFactor; return Entropy;}
-	if (residueType == "GLN" || residueType == "GND") 													{Entropy = (kt*log(5*27))*EntropyFactor; return Entropy;}
-	if (residueType == "GLU" || residueType == "GUD" || residueType == "GLH" || residueType == "GHD") 	{Entropy = (kt*log(5*27))*EntropyFactor; return Entropy;}
-	if (residueType == "GLY" ) 																			{Entropy = (kt*log(12*1))*EntropyFactor; return Entropy;}
-	if (residueType == "HIE" || residueType == "HID" || residueType == "HIP" || residueType == "HED" 
-	   || residueType == "HDD" || residueType == "HPD") 												{Entropy = (kt*log(9*9))*EntropyFactor; return Entropy;}
-	if (residueType == "ILE" || residueType == "ILD") 													{Entropy = (kt*log(6*9))*EntropyFactor; return Entropy;}
-	if (residueType == "LEU" || residueType == "LED") 													{Entropy = (kt*log(3*9))*EntropyFactor; return Entropy;}
-	if (residueType == "LYS" || residueType == "LYD") 													{Entropy = (kt*log(6*81))*EntropyFactor; return Entropy;}
-	if (residueType == "MET" || residueType == "MED") 													{Entropy = (kt*log(3*27))*EntropyFactor; return Entropy;}
-	if (residueType == "PHE" || residueType == "PHD") 													{Entropy = (kt*log(5*9))*EntropyFactor; return Entropy;}
-	if (residueType == "PRO" || residueType == "PRD") 													{Entropy = (kt*log(4*2))*EntropyFactor; return Entropy;}
-	if (residueType == "SER" || residueType == "SED") 													{Entropy = (kt*log(9*3))*EntropyFactor; return Entropy;}
-	if (residueType == "THR" || residueType == "THD") 													{Entropy = (kt*log(8*3))*EntropyFactor; return Entropy;}
-	if (residueType == "TRP" || residueType == "TRD") 													{Entropy = (kt*log(3*9))*EntropyFactor; return Entropy;}
-	if (residueType == "TYR" || residueType == "TYD") 													{Entropy = (kt*log(5*9))*EntropyFactor; return Entropy;}
-	if (residueType == "VAL" || residueType == "VAD") 													{Entropy = (kt*log(5*3))*EntropyFactor; return Entropy;}
-	return Entropy;
-}
 
 void residue::coilcoil(const double _pitch)
 {

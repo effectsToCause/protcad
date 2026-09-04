@@ -21,7 +21,6 @@ public:
 	bool updateCurrentChainIndex();
 	UInt last() { return failFlag; }
 
-	protein* getProteinPointer() {return pInputProtein;}
 	chain* getChainPointer() {return pItsCurrentChain;}
 	residue* getResiduePointer() {return pItsCurrentResidue;}
 	UInt getChainIndex() {return itsCurrentChainIndex;}

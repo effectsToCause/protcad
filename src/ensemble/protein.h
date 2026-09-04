@@ -65,8 +65,6 @@ public:
 	void makeAtomSilent(const UInt _chainIndex, const UInt _residueIndex, const UInt _atomIndex);
 	void makeResidueSilent(const UInt _chainIndex, const UInt _residueIndex);
 	vector <chainPosition*> getChainPositionVector(const UInt _chain);
-	UIntVec getItsIndependentChainsMap() { return itsIndependentChainsMap; }
-	vector <vector <int> > getItsChainLinkageMap() { return itsChainLinkageMap; }
 	vector <dblVec> saveCoords( UInt chainIndex, UInt resIndex);
 	void finishProteinBuild();
 	void listSecondaryStructure();
@@ -77,12 +75,10 @@ public:
 
 	
 	//--Organization functions
-	void updateTotalNumResidues();
 	void initializeModificationMethods();
 
 	void resetAllBuffers();
 	static void silenceMessages() {messagesActive = false; }
-	void accessChainZeroResZero();
 	void symmetryLinkChainAtoB(UInt _aIndex, UInt _bIndex);
 	void printAllLinkageInfo();
 	int getIndexFromResNum(UInt _chainIndex, UInt _resnum);
@@ -95,21 +91,15 @@ public:
 	string getTypeStringFromAtomNum(UInt _chainIndex, UInt _resNum, UInt _atomNum) { return itsChains[_chainIndex]->getTypeStringFromAtomNum(_resNum, _atomNum);}
 	string getTypeStringFromResNum(UInt _chainIndex, UInt _resNum) {return itsChains[_chainIndex]->getTypeStringFromResNum(_resNum);}
 	void removeResidue(UInt _chainIndex, UInt _resNum) {return itsChains[_chainIndex]->removeResidue(_resNum);}
-	void removeChain(UInt _chainIndex);
 
 
 	//--Mutations functions
-	void stripToGlycine();
 	void activateForRepacking(const UInt _chainIndex, const UInt _residueIndex);
 	void activateForRepacking(const UInt _chainIndex, const UInt _start, const UInt _end);
 	void activateAllForRepacking(const UInt _chainIndex);
 	void setResNotAllowed(const UInt _chainIndex, const UInt _residueIndex, const UInt _resType);
-	void setListNotAllowed(const UInt _chainIndex, const UInt _residueIndex, const vector <UInt> _typeIndexVector);
 	void setResAllowed(const UInt _chainIndex, const UInt _residueIndex, const UInt _resType);
 	UIntVec getResAllowed (const UInt _chainIndex, const UInt _residueIndex);
-	void setOnlyHydrophilic(const UInt _chainIndex, const UInt _residueIndex);
-	void setOnlyROCHydrophobic(const UInt _chainIndex, const UInt _residueIndex);
-	void setOnlyCharged(const UInt _chainIndex, const UInt _residueIndex);
 	void setOnlyNativeIdentity(const UInt _chainIndex, const UInt _residueIndex);
 	void setAllHydrogensOn(const bool _hydrogensOn);
 	void setAllPolarHydrogensOn(const bool _polarHydrogensOn);
@@ -140,11 +130,8 @@ public:
 	void protSampling(UInt iterations);
 	void protRelax(UInt _sweeps, bool _backbone);
 	void protRelax(UIntVec _frozenResidues, UIntVec _activeChains);
-	void cofactorRelax(UInt _plateau);
 	void protMin(bool _backbone);
 	void protMin(bool _backbone, UIntVec _frozenResidues, UIntVec _activeChains);
-	vector <vector < double > > getRotationEnergySurface(vector < UIntVec > _active, UInt _steps, double _stepSize, UInt _activePos, vector <vector< double > > _bestChiArray, double &_lowestEnergy);
-	vector < double >  getRotationEnergySurface(UIntVec _active, UInt _steps, double _stepSize, UInt _chiPos, vector <double>  _bestChiArray, double &_lowestEnergy);
 	bool isCofactor(UInt chainIndex, UInt resIndex){return itsChains[chainIndex]->isCofactor(resIndex);}   
 
 	//--Energy functions
@@ -153,36 +140,22 @@ public:
 	bool getMoved(UInt chainIndex, UInt resIndex, UInt EorC) {return itsChains[chainIndex]->getMoved(resIndex, EorC);}
 	double protEnergy();
 	double protEnergy(UInt chainIndex);
-	void updateEnergy();
-	void updateEnergy(UInt chainIndex);
 	double protEnergy(UInt chainIndex, UInt resIndex);
 	double getMedianResidueEnergy();
 	double getMedianResidueEnergy(UIntVec _activeChains);
 	double getMedianResidueEnergy(UIntVec _activeChains, UIntVec _activeResidues);
 	bool boltzmannEnergyCriteria(double _deltaEnergy);
-	double boltzmannProbabilityToEnergy(double Pi, double Pj);
 	UInt getNumChis(const UInt _chainIndex, const UInt _resIndex, const UInt _bpt) {return itsChains[_chainIndex]->getNumChis(_resIndex,0); }
 	UInt getNumHardClashes(UInt chainIndex, UInt resIndex);
 	UInt getNumHardClashes();
-	void updateClashes();
 	UInt getNumHardBackboneClashes();
-	void updateBackboneClashes();
-	UInt getMedianResidueNumHardClashes();
 	double getSolvationEnergy(UInt _chainIndex, UInt _residueIndex) {return itsChains[_chainIndex]->getSolvationEnergy(_residueIndex); }
 	double getAtomCharge(UInt _chainNum, UInt _resNum, UInt _atomNum) { return itsChains[_chainNum]->getAtomCharge(_resNum, _atomNum); }
-	double calculateHCA_O_hBondEnergy();
-	double getHBondEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2);
-	double getResPairEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2);
 	double getIntraEnergy(const UInt _chainIndex1, const UInt _resIndex1, const UInt _atomIndex1, const UInt _chainIndex2, const UInt _resIndex2, const UInt _atomIndex2);
-	double getPairwiseResidueEnergy(const UInt _chain1, const UInt _res1, const UInt _chain2, const UInt _res2);
 	double getDielectric(UInt _chainIndex, UInt _residueIndex) {return itsChains[_chainIndex]->getDielectric(_residueIndex); }
 	double getDielectric(UInt _chainIndex, UInt _resIndex, UInt _atomIndex) {return itsChains[_chainIndex]->itsResidues[_resIndex]->itsAtoms[_atomIndex]->getDielectric();}
 	double intraEnergy();
-	double intraSoluteEnergy(bool _updateDielectrics, UInt _activeChain);
-	double interSoluteEnergy(bool _updateDielectrics, UInt _chain1, UInt _chain2);
 	double getSoluteEnergy(UInt chainIndex, UInt resIndex, UInt atomIndex, UInt otherChainIndex, UInt otherResIndex, UInt otherAtomIndex);
-	double getBackboneHBondEnergy(UInt donorChainIndex, UInt donorResIndex, UInt acceptorChainIndex, UInt acceptorResIndex);
-	vector <double> chainBindingEnergy();
 	//vector <double> calculateChainIndependentDielectric(chain* _chain, residue* _residue, atom* _atom);
 	//vector <double> calculateResidueIndependentDielectric(residue* _residue, atom* _atom);
 	void updateDielectrics();
@@ -193,17 +166,10 @@ public:
 	//void updateResidueIndependentDielectrics(UInt _chainIndex, UInt _resIndex);
 	double intraEnergy(const UInt _chain);
 	double intraEnergy(UInt _chain1, UInt _chain2);
-	double getRotamerEnergy(UInt _chain, UInt _residue) { return itsChains[_chain]->rotamerEnergy(_residue); }
-	double getSelfEnergy(UInt _chainIndex, UInt _residueIndex);
-	vector <double> protLigandBindingEnergy(UInt ligChainIndex, UInt ligResIndex);
 	static void setTemperature( const double _temp ) { residue::setTemperature(_temp); }
 	static double Temperature() { return residue::getTemperature(); }
 
 	// --CUDA related functions
-	void loadDeviceMemEnergy();
-	void freeDeviceMemEnergy();
-	void loadDeviceMemClash();
-	void freeDeviceMemClash();
 	void loadDeviceMemAll();
 	void freeDeviceMemAll();
 	double protEnergyCU();
@@ -214,7 +180,6 @@ public:
 	// order, the same ordering buildEnergyContext uses.
 	bool protFreezeDielectricCU();
 	bool protThawDielectricAllCU();
-	bool protThawDielectricNoneCU();
 	// Thaw every atom within _radius of any atom of the given residue.  This is
 	// the near-shell exemption the packing work is built on: the far field is
 	// held, the neighbourhood of the moved sidechain stays exact.  Returns the
@@ -226,17 +191,12 @@ public:
 	// the post-move state and thaw around what actually moved.
 	// Smallest exemption radius for which the frozen dielectric is provably
 	// exact, derived from the occupancy kernel's own neighbour test.
-	double protDielectricInfluenceRadiusCU();
 	// Evaluate only what the last move changed.  Requires a frozen dielectric
 	// and a thaw set built by protThawDielectricForMoveCU.  Returns the changed
 	// part and the full torsion energy; see energyComputeDelta.
 	int protEnergyDeltaCU(double& _part, double& _torsion);
 	// Change the nonbonded cutoff at runtime, for measuring what it buys.
 	// The switching window is kept 2 A wide below the cutoff.
-	void protSetCutoffCU(double _cutoff);
-	double protGetCutoffCU();
-	void getDeviceCoordsCU(std::vector<double>& _x, std::vector<double>& _y,
-	                       std::vector<double>& _z);
 	// Thaw the exact set a move perturbs: every atom within _radius of an atom
 	// that actually changed position, taken over both the before and after
 	// geometry.  Thawing around the whole residue instead is correct but
@@ -328,7 +288,6 @@ public:
 	bool protEnergyBreakdownCU(energyBreakdown& _out);
 	// --- Population Monte Carlo -------------------------------------------
 	// Seed nRepl independent Metropolis walkers from the current conformation.
-	int setDeviceReplicas(int _nRepl);
 	// Propose one move per replica, applied to that replica's own state, and
 	// evaluate the whole population in a single launch. Angles are deltas in
 	// degrees, row-major [nRepl][angleStride].
@@ -336,7 +295,6 @@ public:
 	                       const double* _anglesDeg, int _angleStride, double* _totals);
 	// Keep the proposals of replicas with accept[k] != 0; the rest are unchanged.
 	int commitReplicas(int _nRepl, const int* _accept);
-	int getReplicaCoords(int _k, double* _x, double* _y, double* _z);
 	// Overwrite every atom position from a flat array in atomIterator order.
 	void setCoordsFromArray(const double* _x, const double* _y, const double* _z);
 	// Largest chi count over all residues, i.e. the angle stride a replica
@@ -373,7 +331,6 @@ public:
 
 	void protMinReplicaCU(UInt _sweeps, UInt _nReplicas);
 	// Number of disulfide cross-links removed from the nonbonded sum.
-	int getDisulfideCount() const {return itsDisulfideCount;}
 	// Randomized-order sweeps of energy-based steepest descent over sidechain
 	// torsions. Same objective and same GPU path as protMinCU, but bounded by a
 	// sweep count instead of a Metropolis plateau, so it is cheap enough to run
@@ -407,13 +364,11 @@ public:
 	double getPhi(UInt _chain, UInt _res) {return itsChains[_chain]->getPhi(_res);}
 	double getPsi(UInt _chain, UInt _res) {return itsChains[_chain]->getPsi(_res);}
 	double getAngle(UInt _chain, UInt _res, UInt angleType) {return itsChains[_chain]->getAngle(_res, angleType);}
-	double getRMSD(protein* _other);
 	void translate(const dblVec& _dblVec);
 	void translate(const UInt _index, const dblVec& _dblVec);
 	void translate(const UInt _index, const double _x,const double _y,const double _z);
 	void translate(const double _x, const double _y, const double _z);
 	void translateChain(UInt _chain, const double _x, const double _y, const double _z);
-	void translateChainR(UInt _chain, const double _x, const double _y, const double _z);
 	void transform(const UInt _index, const dblMat& _dblMat);
 	void rotate(const UInt _index, const axis _axis, const double _theta);
 	void rotate(const UInt _index, const point& _point, const dblVec& _R_axis, const double _theta);
@@ -434,7 +389,6 @@ public:
 	void setRotamerNotAllowed(const UInt _chainIndex, const UInt _resIndex, const UInt _resType, const UInt _bpt, const UInt _rotamer);
 	void listAllowedRotamers(UInt _chain, UInt _resIndex);
 	void setRotamer(const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _rotamer);
-	void setRotamerWBC(const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _rotamer);
 	void setPolarHRotamer(const UInt _chainIndex, const UInt _resIndex, const UInt _rotamer);
 	UIntVec getCurrentRotamer(UInt _chainPos, UInt _resIndex) { return itsChains[_chainPos]->getCurrentRotamer(_resIndex); }
 	void setCanonicalHelixRotamersOnly(const UInt _chainIndex, const UInt _resIndex, const UInt _resType);
@@ -480,11 +434,8 @@ public:
 	double tabulateSolvationEnergy();
 	double tabulateSolvationEnergy(UInt _chain);
 	double tabulateSolvationEnergy(UInt _chain, UInt _residue);
-	double getItsSolvationParam();
-	void setItsSolvationParam(UInt _param);
 
 	//Sequence analysis
-	double getHammingDistance(vector<string>seq1,vector<string>seq2);
 //--Defined functions------------------------------------------------------------------------------------
 private:
 	bool isValidHelixRotamer ( UInt _resType, UInt _bpt, UInt _allowedRotamer ); // contains our definitions for canonical helix rotamers

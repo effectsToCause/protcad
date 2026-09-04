@@ -99,16 +99,6 @@ vector<treeNode*> treeNode::getImmediateChildren()
 	return tempVec;
 }
 
-void treeNode::printImmediateChildren()
-{
-    vector<treeNode*> tempVec=getImmediateChildren();
-    cout << "# children=" << tempVec.size() << "...";
-    
-    for(UInt i=0; i<tempVec.size(); i++)
-    {
-        cout << static_cast<atom*>(tempVec[i])->getName()<< " ";
-    }
-}
 
 void treeNode::queryChildren()
 {	treeNode* temp = getChild();

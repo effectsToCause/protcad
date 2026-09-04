@@ -147,7 +147,6 @@ public:
 	double getAmide();
 	double getAtomCharge(UInt _atomNum) {return residueTemplate::itsAmberElec.getItsCharge(itsType, itsAtoms[_atomNum]->itsType); }
 	string getAtomName(UInt _atomNum) {return itsAtoms[_atomNum]->getName(); }
-	void setOmega(double _omega);
 	int setPhi(double _phi);
 	int setPsi(double _psi);
 	int setDihedral(double _dihedral, UInt _angleType, UInt _direction);
@@ -171,7 +170,6 @@ public:
 	double getChi(const UInt _bpt, const UInt _index) const;
 	double getChi(const UInt _index) const;
     double getBetaChi();
-	double getBetaChiR();
     double getPolarHChi() const;
     double netCharge();
 
@@ -199,7 +197,6 @@ private:
 	
 	bool isSeparatedByOneOrTwoBonds(UInt _index1, UInt _index2);
 	bool isSeparatedByOneOrTwoBonds(UInt _index1, residue* _pRes2, UInt _index2);
-	bool isSeparatedByOneOrTwoBackboneBonds(UInt _index1, residue* _pRes2, UInt _index2);
 	bool isSeparatedByThreeBackboneBonds(UInt _index1, residue* _pRes2, UInt _index2);
 	bool isClash(UInt _index1, UInt _index2);
 	bool isClash(UInt _index1, residue* _other, UInt _index2);
@@ -235,17 +232,14 @@ public:
 	void rotate_new(atom* _pivotAtom, const dblMat& _RMatrix);
 	void rotate_new(atom* _pivotAtom, atom* _firstAtom, const dblMat& _RMatrix);
 	string getTypeStringFromAtomNum(UInt _atomNum) { return itsAtoms[_atomNum]->getType(); }
-	string getNameStringFromAtomNum(UInt _atomNum) { return itsAtoms[_atomNum]->getName(); }
 	void translate(dblVec* _pDoubleVector);
 	void translate(const dblVec& _dblVec);
 	void recursiveTranslateWithDirection(dblVec& _dblVec, UInt _direction);
-	void recursiveTranslateLocal(dblVec& _dblVec, int direction);
 	void recursiveTranslate(dblVec& _dblVec);
 	void transform(dblMat* _pDoubleMatrix);
 	void transform(const dblMat& _dblMat);
 	void recursiveTransformR(dblMat& _dblMat);
 	void recursiveTransform(dblMat& _dblMat);
-	void recursiveTransformLocal(dblVec& atomCoords, double _deltaTheta, UInt _direction);
     void listConnectivity();
 	void coilcoil(const double _pitch);
 	residue* superimposeGLY();
@@ -253,9 +247,7 @@ public:
 	void alignAmideProtonToBackbone();
 
 	// utilities
-	void printCoords() const;
 	void updateMovedDependence(residue* _other, UInt _EorC);
-	double configurationEntropy();
     double getSolvationEnergy();
     double getDielectric();
     double maxwellGarnettApproximation(UInt _atomIndex1, UInt _atomIndex2, double _dielectric, double _distanceSquared);
@@ -269,8 +261,6 @@ public:
 	vector<UInt> getBondedAtoms(UInt _index);
 	double getVDWEpsilon(UInt _index);
 	double getCharge(UInt _index);
-    bool notHydrogen(UInt _atomIndex);
-    double getTotalVolumeofBondedAtoms(UInt _atomIndex);
 
 private:
 	double wodakVolume();
@@ -335,9 +325,7 @@ public:
 // ***********************************************************************
 
 public:
-	bool getHydrogensOn() const {return hydrogensOn;}
 	void setHydrogensOn(const bool _hydrogensOn) ;
-	bool getPolarHydorgensOn() const {return polarHydrogensOn;}
 	void setPolarHydrogensOn(const bool _polarHydrogensOn);
 	bool getHasPolarHRotamers() const {return dataBase[itsType].getHasPolarHRotamers(); }
 	void setMoved(bool _moved, UInt _EorC);
@@ -355,8 +343,6 @@ public:
 	// storing it, which truncated odd counts and lost a pair.
 	void setClashes (UInt _clashes);
 	UInt getClashes() const {return clashes;}
-	void setIntraClashes (UInt _clashes) {intraClashes = _clashes;}
-	void sumIntraClashes (UInt _clashes) {intraClashes += _clashes;}
 	UInt getIntraClashes() const {return intraClashes;}
 	void setBackboneClashes (UInt _clashes);
 	UInt getBackboneClashes() const {return clashesB;}
@@ -376,7 +362,6 @@ public:
 	static void setupDataBase();
 	static void setupDataBase(const bool _Hflag);
 	static void setupDataBase(const bool _Hflag, const bool _HPflag);
-	static double getCutoffDistance() {return cutoffDistance; }
 	static void setCutoffDistance( const double _cutoff ) { cutoffDistance = _cutoff; cutoffDistanceSquared = _cutoff*_cutoff; }
 	static void setTemperature( const double _temp ) { temperature = _temp; }
 	static double getTemperature() { return temperature; }
@@ -384,9 +369,7 @@ public:
 	static void setPolarizableElec( bool _polElec ) { polarizableElec = _polElec; }
 	static void setElectroSolvationScaleFactor( const double _Esolv ) { EsolvationFactor = _Esolv; }
 	static void setEntropyFactor( const double _EntropyF ) { EntropyFactor = _EntropyF; }
-	static double getElectroSolvationScaleFactor() { return EsolvationFactor; }
 	static void setHydroSolvationScaleFactor( const double _Hsolv ) { HsolvationFactor = _Hsolv; }
-	static double getHydroSolvationScaleFactor() { return HsolvationFactor; }
 
 
 // ***********************************************************************
@@ -425,12 +408,6 @@ private:
 
 	public:
 	static vector<residueTemplate> dataBase;
-	static void printDataBaseData()
-		{	for (UInt i=0; i<dataBase.size(); i++)
-			{	cout << "database residue type " << i << endl;
-				dataBase[i].printAtomEnergyTypeDefinitions();
-			}
-		}
 	private:
 	static UInt howMany;
 	static bool dataBaseBuilt;

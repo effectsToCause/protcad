@@ -30,7 +30,6 @@ public:
 	bool isHeadNode();
 
 	vector<treeNode*> getImmediateChildren();
-        void printImmediateChildren();
 	void queryChildren();
 	void queryChildrensCoords();
 	UInt getNumChildren();

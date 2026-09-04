@@ -30,7 +30,6 @@ public:
 	string getChainID() const {return chainID;}
 	string getCharge() const { return charge;}
 	string getElement() const { return element;}
-	bool getHetflag() const {return hetflag;}
 
 private:
 	void convert(string& _pdbAtomLine);

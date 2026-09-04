@@ -20,10 +20,6 @@ public:
 	~secondaryStructure();
 	
 	int getSecondaryStructure() {return itsSecondaryStructureIndex;}
-	UInt getStartingResidue() {return itsStartingResidueIndex;}
-	UInt getEndingResidue() {return itsEndingResidueIndex;}
-	void setStartingResidue(UInt _index);
-	void setEndingResidue(UInt _index);
 
 	void assign(chain* _pTheChain);
 	

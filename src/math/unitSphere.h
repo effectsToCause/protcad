@@ -40,9 +40,6 @@
 class spherePoint : public point
 {
 public:
-	point* getSpherePoint(UInt _index);
-	void setSphereSize(UInt _size);
-	vector <point*> getAllSpherePoints();
 	static UInt getSphereSize() { return itsSize; }	
 	static double getX(UInt _index);
 	static double getY(UInt _index);

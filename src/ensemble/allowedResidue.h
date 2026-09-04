@@ -26,7 +26,6 @@ public:
 	void buildAllowedRotamers(const UInt _lib);
 	UInt getIdentity() const {return itsIdentity;}
 	void setRotamerNotAllowed(const UInt _bpt, const UInt _rotamer);
-	UInt getRotamerLibSize(const UInt _bpt) const;
 	int chooseRotamerFromLibrary(const UInt _bpt, ran& _ran) const;
 	int chooseBranchpoint(ran& _ran) const;
 	void listAllowedRotamers() const;
@@ -35,13 +34,11 @@ public:
 
 
 	vector<UInt> getCurrentRotamerIndex() const { return itsCurrentRotamerIndex;}
-	UInt getCurrentPolarHRotamerIndex() const { return itsCurrentPolarHRotamerIndex;}
 	void setCurrentRotamerIndex(const UInt _rotamerIndex);
 	void setCurrentRotamerIndex(vector<UInt> _rotamerIndex);
 	void setCurrentPolarHRotamerIndex(const UInt _rotamerIndex);
 
 private:
-	int getRotamerFromIndex(const UInt _bpt, const UInt _index) const;
 	void deleteRotamer(const UInt _bpt, const UInt _index);
 	UInt itsIdentity;
 	vector<UInt> itsCurrentRotamerIndex;

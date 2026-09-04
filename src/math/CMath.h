@@ -39,8 +39,6 @@ namespace CMath
 	dblVec cross(const dblVec& _one, const dblVec& _two) ;
 	double determinant(const dblMat& _matrix);
 	double determinant(const dblMat* _pMatrix); 
-	double linearInterpolate(const double _m, const double _b,
-		const double x);
 /*
 	double rmsd(vector<double>& _theWeights, 
 		vector<dblVec>& _coord_fixed, vector, <dblVec>& _coord_mobile,

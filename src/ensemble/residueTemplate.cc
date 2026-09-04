@@ -98,22 +98,6 @@ void residueTemplate::initializeChiDefinitions()
 	chiDefinitionsInitialized = true;
 }
 
-void residueTemplate::initializeHasPolarHRotamers()
-{
-	switch (typeIndex)
-	{
-		case 15: // Ser
-			hasPolarHRotamers=true;
-			break;
-		case 16: // Thr
-			hasPolarHRotamers=true;
-			break;
-		case 18: // Tyr
-			hasPolarHRotamers=false;
-			break;
-		default: hasPolarHRotamers=false;
-	}
-}
 
 void residueTemplate::addChiDefinitions(const StrVec& _strVect)
 {	if(!chiDefinitionsInitialized)
@@ -257,10 +241,6 @@ UIntVec residueTemplate::getAtomsOfPolarHChi() const
 	return quad;
 }
 
-void residueTemplate::setHasPolarHRotamers(const bool _hasPolarHRotamers)
-{
-	hasPolarHRotamers = _hasPolarHRotamers;
-}
 
 bool residueTemplate::getHasPolarHRotamers() const
 {
@@ -324,32 +304,8 @@ void residueTemplate::convertAtomTypeStringsToIndices(const StrVec& _strVect)
 #endif
 }
 
-double residueTemplate::getAmberElecEnergy (const int _resType1, const int _atomType1, const int _resType2, const int _atomType2, const double _distance)
-{
-	if (_resType1 >= 0 && _atomType1 >= 0 && _resType2 >= 0 && _atomType2 >= 0)
-	{
-		return itsAmberElec.getEnergy(UInt(_resType1), UInt(_atomType1), UInt(_resType2), UInt(_atomType2), _distance);
-	}
-	return 0.0;
-}
 
-double residueTemplate::getAmberElecSoluteEnergy (const int _resType1, const int _atomType1, const int _resType2, const int _atomType2, const double _distance, const double _dielectric)
-{
-	if (_resType1 >= 0 && _atomType1 >= 0 && _resType2 >= 0 && _atomType2 >= 0)
-	{
-		return itsAmberElec.getSoluteEnergy(UInt(_resType1), UInt(_atomType1), UInt(_resType2), UInt(_atomType2), _distance, _dielectric);
-	}
-	return 0.0;
-}
 
-double residueTemplate::getAmberElecSoluteEnergySQ (const int _resType1, const int _atomType1, const int _resType2, const int _atomType2, const double _distanceSquared,  const double _dielectric)
-{
-	if (_resType1 >= 0 && _atomType1 >= 0 && _resType2 >= 0 && _atomType2 >= 0)
-	{
-		return itsAmberElec.getSoluteEnergySQ(UInt(_resType1), UInt(_atomType1), UInt(_resType2), UInt(_atomType2), _distanceSquared, _dielectric);
-	}
-	return 0.0;
-}
 
 double residueTemplate::getAmberElecEnergySQ (const int _resType1, const int _atomType1, const int _resType2, const int _atomType2, const double _distanceSquared)
 {
@@ -411,14 +367,6 @@ double residueTemplate::getVolume(const int _type1)
     return 0.0;
 }
 
-double residueTemplate::getVDWEnergy(const int _type1, const int _type2, const double _distance)
-{
-	if( _type1 >= 0 && _type2 >= 0)
-		{	//cout << _type1 << " " << _type2 << endl;
-			return itsAmberVDW.getEnergy(UInt(_type1),UInt(_type2), _distance);
-		}
-	return 0.0;
-}
 
 bool residueTemplate::isClash(const int _type1, const int _type2, const double _distance)
 {
@@ -444,41 +392,9 @@ double residueTemplate::getVDWEnergySQ(const int _type1, const int _type2, const
 
 }
 
-double residueTemplate::getVDWWaterEnergy(const int _type1)
-{
-    if (_type1 >= 0)
-    {
-        return itsAmberVDW.getWaterEnergy(UInt(_type1));
-    }
-    else
-    {
-        cout << "VDW types not found in database: " << _type1 << endl;
-        return 0.0;
-    }
 
-}
 
-double residueTemplate::getAABaselineEnergy(const string& _name)
-{
-	return itsAABaseline.getEnergy(_name);
-}
 
-vector<string> residueTemplate::getAABaselineList()
-{
-	return itsAABaseline.list();
-}
-
-int residueTemplate::getAtomEnergyTypeDefinition(const int _type, const int _field) const
-{
-	if (_type >=0 && _field >=0)
-	{	if (UInt(_type) < itsAtomEnergyTypeDefinitions.size())
-		{	if (UInt(_field) < itsAtomEnergyTypeDefinitions[_type].size())
-			{	return itsAtomEnergyTypeDefinitions[_type][_field];
-			}
-		}
-	}	
-	return -1;
-}
 
 void residueTemplate::printAtomEnergyTypeDefinitions() const
 {

@@ -31,7 +31,6 @@ public:
     vector <UIntVec> getAllowedRotamers(UInt _resType);
 	bool residueIsAllowed(UInt _aaType);
 	UInt getResNum() {return itsResNum;}
-	UInt getNumAllowedRes() {return itsAllowedResidues.size();}
 	UInt getCurrentAllowedResIdentity() const;
 	UIntVec getResAllowed();
 
@@ -54,7 +53,6 @@ public:
 
 	static UInt getHowMany() {return howMany;}
 
-	void setSecondaryStructureIndex(UInt _index) {itsSecondaryStructureIndex = _index;}
 	UInt getSecondaryStructureIndex() {return itsSecondaryStructureIndex;}
 	int getCurrentResIndex() {return itsCurrentAllowedResIndex;}
 
@@ -66,7 +64,6 @@ public:
 	 rotamer conformations for that amino acid. This is called by the frontend
 	 graphics routines */
 
-	vector < vector <UIntVec> > getAllowedDB() const;
 
 private:
 

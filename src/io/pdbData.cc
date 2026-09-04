@@ -92,16 +92,6 @@ unsigned int pdbData::getPdbParseBaseSize()
 {	return pdbParseBase->size();
 }
 
-pdbData::pdbParse* pdbData::getPdbParseBaseItem( const unsigned int _itemIndex )
-{	if( _itemIndex < getPdbParseBaseSize() )
-	{	return (*pdbParseBase)[_itemIndex];
-	}
-	else
-	{	cout << " _itemIndex " << _itemIndex <<" is incompatible with the pdbParseBase ";
-		cout << endl;
-		exit (1);
-	}
-}
 
 // CurrentPdbParse Related Operations
 
@@ -233,9 +223,6 @@ int pdbData::pdbDoTheParsing()
 	return incompleteLine;
 }
 
-void pdbData::pdbPutLine(ofstream& _outFile)
-{	
-}
 
 pdbAtom::pdbAtom()
 {	serial = 0;

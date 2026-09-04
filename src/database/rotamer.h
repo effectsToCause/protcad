@@ -27,7 +27,6 @@ public:
 
 private:
 	void   setEnergy(double _energy) {itsEnergy = _energy;}
-	void   setAngles(UIntVec _angles) {itsAngles = _angles;}
 
 private:
 	UIntVec itsAngles;

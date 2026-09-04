@@ -87,8 +87,6 @@ public:
 	double distanceSquared(const atom& otherAtom) const;
 	double distanceSquared(atom* pOtherAtom) const;
 	bool inCutoff (const atom* pOtherAtom, double _cutoffDistance);
-	double inCubeWithDist (const atom* pOtherAtom, double _cutoff);
-    double inCubeWithDistSQ (const atom* pOtherAtom, double _cutoff);
 	bool inCube (const atom* pOtherAtom, double _cutoffDistance);
 	bool inCutoffSQ (const atom* pOtherAtom, double _cutoff, double _cutoffSquared);
 	bool inCutoff (const atom& OtherAtom, double _cutoffDistance);
@@ -96,8 +94,6 @@ public:
 	// Other
  	bool isFullySpecified() const {return fullySpecified;}
  	void setIsFullySpecified() {fullySpecified = true;}
- 	void setIsNotFullySpecified() {fullySpecified = false;}
-	void sethetatmFlag(bool _flag) {hetatmFlag=_flag;}
 // ***********************************************************************
 // ***********************************************************************
 //	Atom Properties`Accessors And Modifiers
@@ -106,23 +102,16 @@ public:
 
 public:
 	// Radius Related Operations
-	double getEnvVol() {return EnvVol; }
 	void setEnvVol(double _envVol);
-	void sumEnvVol(double _envVol);
 	void setRPTType(UInt _RPT);
 	UInt getRPTType() const {return RPT;}
 	double getRadius() const {return itsRadius; }
 	double getEpsilon() const {return itsEpsilon; }
 	double getPolarizability() const {return itsPolarizability; }
 	double getVolume() const {return itsVolume; }
-	void setRadius(const double _radius);
-	void setAtomicRadius(double _radius);
 	double getSolvationEnergy() {return itsSolvationEnergy;}
 	double getDielectric() {return itsDielectric;}
-	double getNumberofWaters() {return itsWaters;}
-	void setSolvationEnergy(double _solvationEnergy);
 	void setDielectric(double _dielectric);
-	void setNumberofWaters(double _waters);
 
 	// Charge
 	int   getSerialNumber() const {return itsSerialNumber;}
@@ -132,9 +121,7 @@ public:
 	void  setCharge(const double _c);
 	double getCharge() const {return itsCharge; }
 	char  getChainID() const {return itsChainID;}
-	string getLigChainID() const {return itsLigChainID;}
 	void  setChainID(char _ID) {itsChainID = _ID; }
-	void  setLigChainID(string _ID){itsLigChainID= _ID;}
 	string getResType() const;
 	bool getSilentStatus() { return isSilent; }
 
@@ -177,7 +164,6 @@ public:
 	// i.e. CA,CB,ND1, etc.
 	string getName() const;
 protected:
-	void setName(const int _atomName) {itsName = _atomName;}
 	// Name should only be set from residue which has access to this
 	// function
 
@@ -250,10 +236,7 @@ protected:
 
 public:
 	void initializeSpherePoints();
-	UInt getHowManySpherePoints() { return itsSpherePointFlags.size(); }
 	void removeSpherePoints(atom* _pOtherAtom);
-	double getItsProbeRadius() { return itsProbeRadius; }
-	void setItsProbeRadius(double _probeRadius) { itsProbeRadius = _probeRadius; }
 	double calculateTotalSASA();
 	double calculateExposedSASA();	
 	double calculateBuriedSASA();

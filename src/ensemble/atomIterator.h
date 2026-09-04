@@ -15,7 +15,6 @@ public:
 	~atomIterator();
 
 	atomIterator& operator++ (int _x);	
-	void initializeLigand();
 	void initialize();
 
 private:
@@ -25,10 +24,7 @@ private:
 	bool updateCurrentChainIndex();
 public:
 	UInt last() { return failFlag; }
-	void setHeavyAtomsOnly() {heavyOnly = true;}
-	void setAllAtoms() {heavyOnly = false;}
 
-	protein* getProteinPointer() {return pInputProtein;}
 	chain* getChainPointer() {return pItsCurrentChain;}
 	residue* getResiduePointer() {return pItsCurrentResidue;}
 	atom* getAtomPointer() {return pItsCurrentAtom;}

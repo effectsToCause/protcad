@@ -76,49 +76,6 @@ int ensemble::mutate(vector <int> _position, UInt _resType)
 }
 
 
-int ensemble::symmetryLinkMolAndChain(UInt _indMol, UInt _indChain, UInt _slaveMol, UInt _slaveChain)
-{
-	cout << "Linking mol-chain" << _slaveMol << "," << _slaveChain << " to the independent position: " << _indMol << "," << _indChain << endl;
-
-	bool molAndChainInList = false;
-	UInt independentPosition = 0;
-	for (UInt i = 0; i < itsIndMolAndChainList.size(); i++)
-	{
-		if (itsIndMolAndChainList[i][0] == _indMol && itsIndMolAndChainList[i][1] == _indChain)
-		{
-			// molecule already exists in independent list
-			molAndChainInList = true;
-			independentPosition = i;
-		}
-	}
-	if (!molAndChainInList)
-	{
-		// add master to the independent list
-		vector <UInt> tmpVec; 
-		tmpVec.push_back(_indMol);
-		tmpVec.push_back(_indChain);
-		itsIndMolAndChainList.push_back(tmpVec);
-		independentPosition = itsIndMolAndChainList.size() - 1;
-
-		// create new entry in linkage map and add slave mol and chain to position 0
-		vector < vector <UInt> > tmpSlaveVec;
-		tmpSlaveVec.resize(1);
-		tmpSlaveVec[0].push_back(_slaveMol);
-		tmpSlaveVec[0].push_back(_slaveChain);
-		itsMolAndChainLinkageMap.push_back(tmpSlaveVec);
-		printLinkageInfo();
-		return 1;
-	}
-	else
-	{
-		vector<UInt> tmpSlaveVec;
-		tmpSlaveVec.push_back(_slaveMol);
-		tmpSlaveVec.push_back(_slaveChain);
-		itsMolAndChainLinkageMap[independentPosition].push_back(tmpSlaveVec);
-		printLinkageInfo();
-		return 1;
-	}
-}
 
 void ensemble::printLinkageInfo()
 {

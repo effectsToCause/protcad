@@ -108,21 +108,6 @@ void protein::initializeModificationMethods()
 	itsModificationMethods[3] = 0;
 	itsModificationMethods[4] = 0;
 }
-void protein::removeChain(UInt _chainIndex)
-{
-	
-	for (UInt i = 0; i < itsChains.size(); i++)
-	{
-		if (i > _chainIndex)
-		{
-			cout << "map " << itsIndependentChainsMap[i] << endl;
-			itsIndependentChainsMap[i] = itsIndependentChainsMap[i]-1;
-		}
-	}
-	delete itsChains[_chainIndex];
-	itsChains.resize(itsChains.size()-1);
-	
-}
 
 void protein::symmetryLinkChainAtoB(UInt _aIndex, UInt _bIndex)
 {
@@ -363,71 +348,9 @@ void protein::setResAllowed(const UInt _chainIndex, const UInt _residueIndex, co
 	}
 }
 
-void protein::setOnlyCharged(const UInt _chainIndex, const UInt _residueIndex)
-{
-	// only allow LYS, ARG, GLU, HIS and ASP
 
-        setResNotAllowed(_chainIndex,_residueIndex,0); //ALA
-        setResNotAllowed(_chainIndex,_residueIndex,2); //ASN
-        setResNotAllowed(_chainIndex,_residueIndex,4); //CYS
-        setResNotAllowed(_chainIndex,_residueIndex,5); //GLN
-        setResNotAllowed(_chainIndex,_residueIndex,7); //GLY
-        setResNotAllowed(_chainIndex,_residueIndex,9); //ILE
-        setResNotAllowed(_chainIndex,_residueIndex,10); //LEU
-        setResNotAllowed(_chainIndex,_residueIndex,12); //MET
-        setResNotAllowed(_chainIndex,_residueIndex,13); //PHE
-        setResNotAllowed(_chainIndex,_residueIndex,14); //PRO
-        setResNotAllowed(_chainIndex,_residueIndex,15); //SER
-        setResNotAllowed(_chainIndex,_residueIndex,16); //THR
-        setResNotAllowed(_chainIndex,_residueIndex,17); //TRP
-        setResNotAllowed(_chainIndex,_residueIndex,18); //TYR
-        setResNotAllowed(_chainIndex,_residueIndex,19); //VAL
-		return;
-}
 
-void protein::setListNotAllowed(const UInt _chainIndex, const UInt _residueIndex, const vector <UInt> _typeIndexVector)
-{
-	for (UInt i = 0; i < _typeIndexVector.size(); i++)
-		setResNotAllowed(_chainIndex,_residueIndex,_typeIndexVector[i]);
-	return;
-}
 
-void protein::setOnlyHydrophilic(const UInt _chainIndex, const UInt _residueIndex)
-{
-		setResNotAllowed(_chainIndex,_residueIndex,0); //ALA
-		setResNotAllowed(_chainIndex,_residueIndex,4); //CYS
-		setResNotAllowed(_chainIndex,_residueIndex,7); //GLY
-		setResNotAllowed(_chainIndex,_residueIndex,9); //ILE
-		setResNotAllowed(_chainIndex,_residueIndex,10); //LEU
-		setResNotAllowed(_chainIndex,_residueIndex,12); //MET
-		setResNotAllowed(_chainIndex,_residueIndex,13); //PHE
-		setResNotAllowed(_chainIndex,_residueIndex,14); //PRO
-		setResNotAllowed(_chainIndex,_residueIndex,15); //SER
-		setResNotAllowed(_chainIndex,_residueIndex,16); //THR
-		setResNotAllowed(_chainIndex,_residueIndex,17); //TRP
-		setResNotAllowed(_chainIndex,_residueIndex,18); //TYR
-		setResNotAllowed(_chainIndex,_residueIndex,19); //VAL
-}
-
-void protein::setOnlyROCHydrophobic(const UInt _chainIndex, const UInt _residueIndex)
-{
-		setResNotAllowed(_chainIndex,_residueIndex,0); //ALA
-		setResNotAllowed(_chainIndex,_residueIndex,1); //ARG
-		setResNotAllowed(_chainIndex,_residueIndex,2); //ASN
-		setResNotAllowed(_chainIndex,_residueIndex,3); //ASP
-		setResNotAllowed(_chainIndex,_residueIndex,4); //CYS
-		setResNotAllowed(_chainIndex,_residueIndex,5); //GLN
-		setResNotAllowed(_chainIndex,_residueIndex,6); //GLU
-		setResNotAllowed(_chainIndex,_residueIndex,7); //GLY
-		setResNotAllowed(_chainIndex,_residueIndex,8); //HIS
-		setResNotAllowed(_chainIndex,_residueIndex,11); //LYS
-		setResNotAllowed(_chainIndex,_residueIndex,12); //MET
-		setResNotAllowed(_chainIndex,_residueIndex,14); //PRO
-		setResNotAllowed(_chainIndex,_residueIndex,15); //SER
-		setResNotAllowed(_chainIndex,_residueIndex,16); //THR
-		setResNotAllowed(_chainIndex,_residueIndex,17); //TRP
-		setResNotAllowed(_chainIndex,_residueIndex,18); //TYR
-}
 
 void protein::setOnlyNativeIdentity(const UInt _chainIndex, const UInt _residueIndex)
 {
@@ -477,14 +400,6 @@ double protein::netCharge()
 }
 
 
-void protein::stripToGlycine()
-{
-	for (UInt theChain =0; theChain<itsChains.size(); theChain++)
-	{	for (UInt res=0; res< itsChains[theChain]->getNumResidues(); res++)
-		{	mutateWBC(theChain,res,7);
-		}
-	}
-}
 
 int protein::mutate(vector <int> _position, UInt _resType)
 {
@@ -1481,8 +1396,6 @@ void protein::buildEnergyContext()
 		bool useLegacy = (legacyEnv && legacyEnv[0] == '1');
 		par = useLegacy ? legacyEnergyParams() : defaultEnergyParams();
 	}
-	par.eSolvationFactor = residue::getElectroSolvationScaleFactor();
-	par.hSolvationFactor = residue::getHydroSolvationScaleFactor();
 	par.vdwScale = amberVDW::getScaleFactor();
 	par.elecScale = amberElec::getScaleFactor();
 
@@ -1498,12 +1411,8 @@ void protein::buildEnergyContext()
 
 // Retained so existing callers keep working; the context now serves energy and
 // clash from one allocation, so all three requests are the same operation.
-void protein::loadDeviceMemEnergy() {buildEnergyContext();}
-void protein::loadDeviceMemClash()  {buildEnergyContext();}
 void protein::loadDeviceMemAll()    {buildEnergyContext();}
 
-void protein::freeDeviceMemEnergy() {freeDeviceMemAll();}
-void protein::freeDeviceMemClash()  {freeDeviceMemAll();}
 
 void protein::freeDeviceMemAll()
 {
@@ -2340,11 +2249,6 @@ double protein::bestSidechainCandidateDeltaCU(UInt _chainIndex, UInt _resIndex,
 	return bestE;
 }
 
-int protein::setDeviceReplicas(int _nRepl)
-{
-	if (syncDeviceCoords() == 0) {return -1;}
-	return energySetReplicas(itsEnergyContext, _nRepl);
-}
 
 int protein::energyReplicaBatch(int _nRepl, const int* _groupBegin, const int* _nGroups,
                                 const double* _anglesDeg, int _angleStride, double* _totals)
@@ -2360,11 +2264,6 @@ int protein::commitReplicas(int _nRepl, const int* _accept)
 	return energyCommitReplicas(itsEnergyContext, _nRepl, _accept);
 }
 
-int protein::getReplicaCoords(int _k, double* _x, double* _y, double* _z)
-{
-	if (!itsEnergyContext) {return -1;}
-	return energyGetReplicaCoords(itsEnergyContext, _k, _x, _y, _z);
-}
 
 void protein::setCoordsFromArray(const double* _x, const double* _y, const double* _z)
 {
@@ -2929,11 +2828,6 @@ bool protein::protThawDielectricAllCU()
 	return energySetDielectricThaw(itsEnergyContext, 0, -1, 0) == 0;
 }
 
-bool protein::protThawDielectricNoneCU()
-{
-	if (!itsEnergyContext) {return false;}
-	return energySetDielectricThaw(itsEnergyContext, 0, 0, 0) == 0;
-}
 
 int protein::protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _radius,
                                       bool _accumulate)
@@ -2976,20 +2870,7 @@ int protein::protThawDielectricNearCU(UInt _chainIndex, UInt _resIndex, double _
 	return energyDielectricThawCount(itsEnergyContext);
 }
 
-void protein::protSetCutoffCU(double _cutoff)
-{
-	if (!itsEnergyContext) {return;}
-	energyParams p = energyGetParams(itsEnergyContext);
-	p.cutoff = _cutoff;
-	p.switchStart = _cutoff - 2.0;
-	energySetParams(itsEnergyContext, p);
-}
 
-double protein::protGetCutoffCU()
-{
-	if (!itsEnergyContext) {return 0.0;}
-	return (double)energyGetParams(itsEnergyContext).cutoff;
-}
 
 int protein::protEnergyDeltaCU(double& _part, double& _torsion)
 {
@@ -3010,17 +2891,7 @@ int protein::protEnergyDeltaCU(double& _part, double& _torsion)
 	                          (int)itsThawList.size(), &_part, &_torsion);
 }
 
-double protein::protDielectricInfluenceRadiusCU()
-{
-	return energyDielectricInfluenceRadius(itsEnergyContext);
-}
 
-void protein::getDeviceCoordsCU(vector<double>& _x, vector<double>& _y,
-                                vector<double>& _z)
-{
-	updateDeviceCoords();
-	_x = itsCoordX; _y = itsCoordY; _z = itsCoordZ;
-}
 
 int protein::protThawDielectricForMoveCU(const vector<double>& _oldX,
                                          const vector<double>& _oldY,
@@ -3135,21 +3006,6 @@ UInt protein::getNumHardBackboneClashes()
 }
 
 // Median residue clash count, now read off the per-residue GPU pass.
-UInt protein::getMedianResidueNumHardClashes()
-{
-	updateResidueClashesCU();
-	vector<UInt> counts;
-	for (UInt i = 0; i < itsChains.size(); i++)
-	{
-		for (UInt j = 0; j < getNumResidues(i); j++)
-		{
-			counts.push_back(itsChains[i]->getClashes(j));
-		}
-	}
-	if (counts.empty()) {return 0;}
-	sort(counts.begin(), counts.end());
-	return counts[counts.size()/2];
-}
 
 // Sum of the isolated-chain energies, i.e. the total with every interchain
 // contribution removed.
@@ -3958,11 +3814,6 @@ bool protein::boltzmannEnergyCriteria(double _deltaEnergy) //calculate boltzmann
 	// search that was greedier than the temperature claimed.
 }
 
-double protein::boltzmannProbabilityToEnergy(double Pi, double Pj) //calculate boltzmann Energy from a probability (Pi) compared to a reference (Pj) probability to determine acceptance criteria
-{
-	double Energy = -residue::getKT()*log(Pi/Pj);
-	return Energy;
-}
 
 // As protEnergy: the clash count now comes from the kernel, which shares the
 // AMBER radius array with the vdW term.  The CPU counter used the older
@@ -3989,15 +3840,6 @@ void protein::updateResiduesPerTurnType()
 	}
 }
 
-void protein::updateTotalNumResidues()
-{
-	UInt numResidues = 0;
-	for(UInt i=0; i<itsChains.size(); i++)
-	{
-		numResidues += getNumResidues(i);
-	}
-	itsNumResidues = numResidues;
-}
 
 UInt protein::getNumResidues(UInt _chainIndex) const
 {	if (_chainIndex < itsChains.size())
@@ -4097,19 +3939,6 @@ void protein::translateChain(UInt _chain, const double _x, const double _y, cons
 	return;
 }
 
-void protein::translateChainR(UInt _chain, const double _x, const double _y, const double _z)
-{
-	if (_chain >= 0 && _chain < itsChains.size())
-	{
-		itsChains[_chain]->translateR( _x, _y, _z);
-	}
-	else
-	{
-		cout << "ERROR in protein::translateChain(...)\n\tchain index is out of bounds ..." << endl;
-		return;
-	}
-	return;
-}
 
 void protein::setSidechainDihedralAngles(UInt _chainIndex, UInt _indexInChain, vector <vector <double> > Angles)
 {
@@ -4283,28 +4112,6 @@ bool protein::isValidHelixRotamer(UInt _resType, UInt _bpt, UInt _rotamer)
 	return false;
 }
 
-void protein::setRotamerWBC(const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _rotamer)
-{
-    //cout << "Setting rotamer res:"<<_resIndex<<" bpt:"<<_bpt<< " rotamer:"<<_rotamer<< endl;
-    if(_chainIndex < itsChains.size())
-    {   itsChains[_chainIndex]->setRotamerWithoutBuffering(_resIndex,_bpt,_rotamer);
-        // find chain in independent chain list
-        UInt indChainIndex = 0;
-        for (UInt i=0; i<itsIndependentChainsMap.size(); i++)
-        {   if (itsIndependentChainsMap[i] == _chainIndex)
-            {   indChainIndex = i;
-            }
-        }
-
-        UInt numSymLinkedChains = itsChainLinkageMap[indChainIndex].size();
-        if (/* numSymLinkedChains != 1 &&*/ itsChainLinkageMap[indChainIndex][0] != -1)
-        {       for (UInt i=0; i<numSymLinkedChains;i++)
-            {
-                itsChains[itsChainLinkageMap[indChainIndex][i]]->setRotamerWithoutBuffering(_resIndex,_bpt,_rotamer);
-            }
-        }
-    }
-}
 
 void protein::setRotamer(const UInt _chainIndex, const UInt _resIndex, const UInt _bpt, const UInt _rotamer)
 {
@@ -4654,69 +4461,6 @@ void protein::listAllowedRotamers(UInt _chain, UInt _resIndex)
     }
 }
 
-double protein::getRMSD(protein* _other)
-{
-    vector<dblVec> coord1;
-    vector<dblVec> coord2;
-    atomIterator theIter1(this);
-    atomIterator theIter2(_other);
-    atom* pAtom;
-    bool first = true;
-    
-    // Load backbone atoms into vector for fit and alignment
-    for (;!(theIter1.last());theIter1++)
-    {
-       pAtom = theIter1.getAtomPointer(); 
-       if(pAtom->getName() == "N" || pAtom->getName() == "CA" || pAtom->getName() == "C" || pAtom->getName() == "O"){
-            coord1.push_back(pAtom->getCoords());
-       }
-    }
-    for (;!(theIter2.last());theIter2++)
-    {
-       pAtom = theIter2.getAtomPointer(); 
-       if(pAtom->getName() == "N" || pAtom->getName() == "CA" || pAtom->getName() == "C" || pAtom->getName() == "O"){
-            coord2.push_back(pAtom->getCoords());
-       }
-    }
-    int diff = 0;
-    if(coord1.size() != coord2.size()){
-		if (coord2.size() < coord1.size()){ diff = coord1.size()-coord2.size(); first = true;}
-		else{diff = coord2.size()-coord1.size(); first = false;}
-    }
-    int maxsize;
-    if (first){maxsize = coord2.size();}else{maxsize = coord1.size();}
-	double rotmat[9]; double centroid1[3]; double centroid2[3]; double rmsd = 0; int ierr = 0;
-	int list1[maxsize]; int list2[maxsize]; int trials = 1; double bestRMSD= 1E10;
-	double newCoord1[maxsize*3]; double newCoord2[maxsize*3]; double newCoord3[maxsize*3]; double rmsdat[maxsize];
-	
-	if (diff != 0){trials = diff;}
-	for (int h = 0; h < trials; h++)
-	{
-		for (int i=0; i<maxsize; i++)
-		{	
-			for (int j=0; j<3; j++)
-			{
-				if(first){
-					newCoord1[ (i*3) + j] = coord1[i+h][j];
-					newCoord2[ (i*3) + j] = coord2[i+h][j];
-				}
-				else{
-					newCoord1[ (i*3) + j] = coord2[i+h][j];
-					newCoord2[ (i*3) + j] = coord1[i+h][j];
-				}
-			}
-			list1[i] = i+1;
-			list2[i] = i+1;
-		}
-		
-		// Calculate best fit of backbone atoms, rotation matrix and rmsd using fortran algorithm based on Machlachlan
-		bestfit_(newCoord1, &maxsize, newCoord2, &maxsize, &maxsize, newCoord3, list1, list2, &rmsd, &ierr, rotmat, centroid1, centroid2, rmsdat);
-		if (rmsd < bestRMSD){
-			bestRMSD = rmsd;
-		}
-	}
-	return bestRMSD;
-}
 
 void protein::alignToAxis(const axis _axis)
 {
@@ -5135,15 +4879,7 @@ double protein::tabulateSurfaceArea(UInt _chainIndex, UInt _residueIndex, UInt _
 	return surfaceArea;
 }
 
-double protein::getItsSolvationParam()
-{
-	return itsSolvationParam;
-}
 
-void protein::setItsSolvationParam(UInt _param)
-{
-	itsSolvationParam = _param;
-}
 
 void protein::removeSpherePoints()
 {
@@ -5242,42 +4978,6 @@ void protein::setAllCoords( UInt chainIndex, UInt resIndex, vector<dblVec> allCo
 	}
 }
 
-void protein::cofactorRelax(UInt _plateau)
-{  
-	UInt pastCofactorClashes = getNumHardClashes(),count = 0;
-	if (pastCofactorClashes > 0)
-	{	
-		//--Initialize variables for loop, calculate starting energy and build energy vectors---------------
-		double rotX,rotY,rotZ;
-		UInt randchain, randres, resnum, chainNum = getNumChains(), cofactorClashes, nobetter = 0;
-		srand (time(NULL));
-
-		//--Run optimizaiton loop to relative minima, determined by _plateau----------------------------
-		do
-		{   //--choose random cofactor
-			do{
-				randchain = rand() % chainNum;
-				resnum = getNumResidues(randchain);
-				randres = rand() % resnum;
-			}while (!isCofactor(randchain, randres));
-			nobetter++;
-			count++;
-	
-			//--cofactor rotation-----------------------------------------------------------------------
-			rotX = rand() % 31, rotY = rand() % 31, rotZ = rand() % 31;
-			rotateChainRelative(randchain,X_axis,rotX), rotateChainRelative(randchain,Y_axis,rotY), rotateChainRelative(randchain,Z_axis,rotZ);
-			cofactorClashes = getNumHardClashes();
-			if (cofactorClashes <= pastCofactorClashes){
-				nobetter = 0, pastCofactorClashes = cofactorClashes;
-			}
-			else{
-				rotateChainRelative(randchain,Z_axis,rotZ*-1), rotateChainRelative(randchain,Y_axis,rotY*-1), rotateChainRelative(randchain,X_axis,rotX*-1);
-			}
-
-		} while (nobetter < _plateau && count < _plateau*10);
-	}
-	return;
-}
 
 void protein::protSampling(UInt iterations)
 {
@@ -5368,20 +5068,6 @@ void protein::saveState(string& _fileName)
 }
 
 //this function will calculate the hammingdistance between two sequences obtained from two pdb files
-double protein::getHammingDistance(vector<string>seq1,vector<string>seq2) 
-{ 
-	double count = 0.0;double percent=0.0;double countsim=0.0;
-	for (UInt i=0;i<seq1.size();i++){
-        	if(seq1[i]==seq2[i]){
-                	if (seq1[i]!="-" || seq2[i]!="X"){
-                        	 count++;
-                }
-         }
-        }
-	countsim=seq1.size()-count;
-	percent=((countsim/double(seq1.size()))*100);
-   	return percent;
-}  
 
 
 

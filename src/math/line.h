@@ -20,8 +20,6 @@ public:
 
 	// Coordinate Related Operations
 	point getPoint(UInt _index) const {return itsPoints[_index]; }
-	void  setPoint(UInt _index, point& _point)
-		{itsPoints[_index] = _point;}
 	
 	void transform(dblMat* _pDoubleMatrix);
 	void transform(const dblMat& _dblMat);

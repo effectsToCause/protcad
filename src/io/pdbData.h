@@ -45,10 +45,7 @@ public:
 	virtual ~pdbData();
 
 	//data accessors
-	void pdbPutLine(ofstream& _outFile);
 	virtual int  pdbGetLine(ifstream& _inFile);
-	bool getDataValid() const { return dataValid;}
-	string getRecordName() { return recordName; }
 	
 	int pdbParseAllLine();
 	int pdbParseSpecificLine();
@@ -57,11 +54,9 @@ public:
 
 protected:
 	int setCurrentPdbParse();
-	void updateCurrentPdbParse(pdbData::pdbParse* _temp);
 
 private:	
 	static void buildPdbParseBase();
-	static pdbData::pdbParse* getPdbParseBaseItem( const unsigned int _itemIndex );
 	static unsigned int getPdbParseBaseSize();
 
 protected:	

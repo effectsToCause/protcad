@@ -225,31 +225,7 @@ bool chain::activateAllForRepacking()
 	return true;
 }
 
-void chain::randomizeSystem(ran& _ran)
-{	for (UInt i=0; i<itsRepackActivePositionMap.size(); i++)
-	{	UInt pos = itsRepackActivePositionMap[i];
-		int id = chooseTargetIdentity(pos,_ran);
-		if (id >=0)
-		{	mutate(pos,id);
-			int bpt = chooseTargetBranchpoint(pos,_ran);
-			if (bpt >=0)
-			{	int rot = chooseTargetRotamer(pos,bpt,_ran);
-				if (rot >=0)
-				{	setRotamerWithoutBuffering(pos,bpt,rot);
-				}
-			}
-		}
-		resetUndoBuffer();
-	}
-}
 
-void chain::makeAllAlanine()
-{	for (UInt i=0; i<itsRepackActivePositionMap.size(); i++)
-	{	UInt pos = itsRepackActivePositionMap[i];
-		mutateWithoutBuffering(pos,0);
-	}
-	return;
-}
 
 void chain::finishChainBuild()
 {
@@ -302,9 +278,6 @@ void chain::listDihedrals()
 	}
 }
 
-void chain::listChiDefinitions() const
-{
-}
 
 void chain::mutate(const UInt _indexInChain, const UInt _aaType)
 {   // Check if the residue is even in our chain
@@ -1342,56 +1315,6 @@ void chain::undoState()
 	return;
 }
 
-void chain::copyState(vector <chainModBuffer> _externalRedoBuffer)
-{
-	//cout << "chain::repeatModification(chainModBuffer _redoBuffer) called" << endl;
-	//cout << "this function not yet implemented" << end
-	stateBuffers.resize(0);
-
-	for (UInt x = 0; x < _externalRedoBuffer.size(); x ++)
-	{
-		int index = _externalRedoBuffer[x].getIndexInChainBuffer();
-		//cout << "externalRedoBufferIndex = " << index << endl;
-
-		if (index != -1)
-		{
-			// buffer the residue that's there into the undo buffer
-			bufferResidueIntoUndoBuffer(index);
-			UInt bufferResType = _externalRedoBuffer[x].getResidueIdentityBuffer();
-			// compare this to what is there already
-			if (bufferResType != itsResidues[index]->getTypeIndex())
-			{	// we need to perform a mutation
-				//cout << "repeating MUT" << endl;
-				mutateWithoutBuffering(index,bufferResType);
-			}
-			vector<double> bufferBBDihedrals = _externalRedoBuffer[x].getBackboneDihedralAngleBuffer();
-			if (bufferBBDihedrals != itsResidues[index]->getBackboneAngles())
-			{
-				itsResidues[index]->setPhi(bufferBBDihedrals[0]);
-				itsResidues[index]->setPsi(bufferBBDihedrals[1]);
-			}
-			vector<UInt> bufferRotamerIndex = _externalRedoBuffer[x].getRotamerIndexBuffer();
-			if (bufferRotamerIndex != itsChainPositions[index]->getCurrentRotamerIndex())
-			{
-				// we need to set the rotameric state
-				//cout << "repeating ROTC" << endl;
-				setRotamerWithoutBuffering(index,bufferRotamerIndex);
-			}
-
-			vector<vector<double> > bufferDihedrals = _externalRedoBuffer[x].getSidechainDihedralAngleBuffer();
-			if (bufferDihedrals != itsResidues[index]->getSidechainDihedralAngles())
-			{
-				//cout << "repeating DIHEDRAL CHANGE" << endl;
-				for (UInt i=0; i<bufferDihedrals.size(); i++)
-				{	for (UInt j=0; j<bufferDihedrals.size(); j++)
-					{
-						setDihedralWithoutBuffering(index,i,j,bufferDihedrals[i][j]);
-					}
-				}
-			}
-		}
-	}
-}
 
 
 void chain::listAllowedRotamers(UInt _indexInChain) const
@@ -2158,13 +2081,6 @@ void chain::bufferResidueIntoRedoBuffer(UInt _index)
 	//itsBuffers[1].printAll();
 }
 
-void chain::setDihedrals(UInt _resIndex, UInt _bpt, vector <double> _dihedrals )
-{
-	for (UInt i = 0; i < _dihedrals.size(); i++)
-	{
-		setDihedralWithoutBuffering(_resIndex, _bpt, i, _dihedrals[i]);
-	}
-}
 
 UInt chain::getNumChis(const UInt _resIndex, const UInt _bpt)
 {

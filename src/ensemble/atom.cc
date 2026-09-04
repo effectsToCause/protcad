@@ -243,21 +243,6 @@ atom::~atom()
 // ***********************************************************************
 // ***********************************************************************
 
-void atom::setRadius(double _radius)
-{/*	if( _radius >= dataBase[itsType].vdwRadius[1] &&
-	    _radius <= dataBase[itsType].vdwRadius[2] )
-	{	itsRadius = _radius;
-	}
-	else
-	{	cout << " the radius value is invalid " << endl;
-		cout << " the radius is not reset " << endl;
-	}
-*/
-}
-void atom::setSolvationEnergy(double _solvationEnergy)
-{
-	itsSolvationEnergy = _solvationEnergy;
-}
 void atom::setDielectric(double _dielectric)
 {	
 	itsDielectric = _dielectric;
@@ -265,14 +250,6 @@ void atom::setDielectric(double _dielectric)
 void atom::setEnvVol(double _envVol)
 {	
 	EnvVol = _envVol;
-}
-void atom::sumEnvVol(double _envVol)
-{	
-	EnvVol += _envVol;
-}
-void atom::setNumberofWaters(double _waters)
-{
-    itsWaters = _waters;
 }
 void atom::setRPTType(UInt _RPT)
 {	
@@ -352,25 +329,7 @@ bool atom::inCutoff(const atom* _pOtherAtom, double _cutoff)
 	return true;
 }
 
-double atom::inCubeWithDist(const atom* _pOtherAtom, double _cutoff)
-{
-	double distance = 0.0;
-	if (fabs(itsCoords[0] - _pOtherAtom->getX()) > _cutoff) return 0.0;
-	if (fabs(itsCoords[1] - _pOtherAtom->getY()) > _cutoff) return 0.0;
-	if (fabs(itsCoords[2] - _pOtherAtom->getZ()) > _cutoff) return 0.0;
-	distance = CMath::distance(itsCoords, _pOtherAtom->getCoords());
-	return distance;
-}
 
-double atom::inCubeWithDistSQ(const atom* _pOtherAtom, double _cutoff)
-{
-	double distance = 0.0;
-    if (fabs(itsCoords[0] - _pOtherAtom->getX()) > _cutoff) return 999.0;
-    if (fabs(itsCoords[1] - _pOtherAtom->getY()) > _cutoff) return 999.0;
-    if (fabs(itsCoords[2] - _pOtherAtom->getZ()) > _cutoff) return 999.0;
-	distance = CMath::distanceSquared(itsCoords, _pOtherAtom->getCoords());
-	return distance;
-}
 
 bool atom::inCube(const atom* _pOtherAtom, double _cutoff)
 {
@@ -684,11 +643,6 @@ void atom::removeSpherePoints(atom* _pOtherAtom)
 }
 
 
-void atom::setAtomicRadius(double _radius)
-{
-    itsRadius = _radius;
-    return;
-}
 
 
 // ********************************************************************

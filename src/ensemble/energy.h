@@ -573,7 +573,6 @@ int energyComputeBatchDelta(energyContext* ctx, int nCand,
 int energyReleaseDielectric(energyContext* ctx);
 
 // Nonzero if a frozen field is currently in force.
-int energyDielectricFrozen(const energyContext* ctx);
 
 // Export the per-atom local dielectric and shell water count for the supplied
 // coordinates.  Both arrays are indexed in the caller's original atom order and
@@ -626,15 +625,9 @@ int energyGetCoords(energyContext* ctx, double* x, double* y, double* z);
 
 // Save / restore the resident coordinates entirely on the device, for cheap
 // accept/reject in a Monte Carlo loop.  No host transfer is involved.
-int energySnapshot(energyContext* ctx);
-int energyRestore(energyContext* ctx);
 
 // Evaluate using the resident coordinates.  perAtomOut, breakdown and the
 // per-atom arrays may be null.
-int energyComputeResident(energyContext* ctx, double* totalOut,
-                          energyBreakdown* breakdown, double* perAtomOut);
-int clashComputeResident(energyContext* ctx, int* clashCountOut, int* perAtomOut);
-int shellComputeResident(energyContext* ctx, double* dielectricOut, double* watersOut);
 
 // Human-readable description of the last error, or null if none.
 const char* energyLastError(energyContext* ctx);

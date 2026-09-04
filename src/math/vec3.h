@@ -157,8 +157,6 @@ class Mat3
     Mat3& operator=(const double& scalar) { set(scalar); return *this; }
 
     int dim(int d) const { VEC3_ASSERT(d == 1 || d == 2); (void)d; return 3; }
-    int num_rows() const { return 3; }
-    int num_cols() const { return 3; }
     int size()     const { return 9; }
 
     double*       operator[](int i)       { VEC3_ASSERT(i >= 0 && i < 3); return m_[i]; }

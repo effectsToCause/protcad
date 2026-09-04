@@ -98,8 +98,6 @@ public:
     // separate header, because the torsion barriers were fitted with the 1-4
     // terms scaled by exactly these numbers -- using one without the other
     // means using the parameters outside the fit that produced them.
-    static double scee() { return 1.2; }   // divides 1-4 electrostatics
-    static double scnb() { return 2.0; }   // divides 1-4 van der Waals
 
     const vector<string>& warnings() const { return itsWarnings; }
 
@@ -116,7 +114,6 @@ private:
     void   readNonbon(const string& line);
     void   readEquivalence(const string& line);
 
-    static string trimType(const string& s);
     static string key2(const string& a, const string& b);
     static string key3(const string& a, const string& b, const string& c);
     static string key4(const string& a, const string& b, const string& c,

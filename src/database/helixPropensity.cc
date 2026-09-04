@@ -89,14 +89,6 @@ void helixPropensity::addToDatabase(const StrVec _parsedStrings)
 	return;
 }
 
-void helixPropensity::printEnergyMap()
-{
-	for (UInt i = 0; i < itsEnergyMap.size(); i ++)
-	{
-		cout << residue::getDataBaseItem(i) << " " << itsEnergyMap[i] << endl;
-	}
-	return;
-}
 
 
 

@@ -51,22 +51,10 @@ class amberElec
 		void buildElectrostatics();
 
 		void dummy();
-		static void distanceDependanceOn()
-			{ distanceDependance = true; cout << " amberElec distance dependance turned on" << endl;}
-		static void distanceDependanceOff()
-			{ distanceDependance = false; cout << " amberElec distance dependance turned off" << endl;}
-		static bool isDistanceDependanceOn()
-			{ return distanceDependance; }
 		static void setScaleFactor (const double _scale)
 			{ itsScaleFactor = _scale; }
 		static double getScaleFactor()
 			{ return itsScaleFactor; }
-		static void setDielectricConstant(const double _dielectricConstant)
-			{ itsDielectricConstant = _dielectricConstant; }
-		static double getDielectricConstant()
-			{ return itsDielectricConstant; }
-		static void setHighEnergyCutOff(const bool _doCutOff)
-			{ highEnergyCutOff = _doCutOff; return;}
 
 		static bool distanceDependance;
 		static double itsScaleFactor;

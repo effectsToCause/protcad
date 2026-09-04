@@ -28,10 +28,7 @@ class helixPropensity
 		~helixPropensity();
 
 		double getEnergy(const UInt _resType);
-		void setHelixPropensityScaleFactor(const double _scaleFactor) {itsHelixPropensityScaleFactor = _scaleFactor; }
-		double getHelixPropensityScaleFactor() {return itsHelixPropensityScaleFactor; }
 		void buildDatabase();
-		void printEnergyMap();
 
 	private:
 

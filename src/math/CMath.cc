@@ -344,10 +344,4 @@ double CMath::determinant(const dblMat* _pMat)
         return determinant;
 }
 
-double CMath::linearInterpolate(const double _m, const double _b, const
-			double _x)
-{
-
-	return _m*_x + _b;
-}
 

@@ -64,13 +64,6 @@ namespace
 amberParams::amberParams() : itsPendingImproper(false) {}
 amberParams::~amberParams() {}
 
-string amberParams::trimType(const string& s)
-{
-    size_t b = s.find_first_not_of(" \t");
-    if (b == string::npos) return string();
-    size_t e = s.find_last_not_of(" \t");
-    return s.substr(b, e - b + 1);
-}
 
 string amberParams::key2(const string& a, const string& b)
 { return a + "-" + b; }

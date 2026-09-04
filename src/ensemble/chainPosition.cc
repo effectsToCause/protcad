@@ -250,34 +250,6 @@ UIntVec chainPosition::getResAllowed()
 }
 
 
-vector< vector < UIntVec > > chainPosition::getAllowedDB() const
-{
-	vector < vector < UIntVec > > database;
-	database.resize(0);
-	vector < UIntVec > allowedRot;
-	UInt numallowed = itsAllowedResidues.size();
-	UInt maxNumAA = residueTemplate::getHowMany();
-	for (UInt j=0; j<maxNumAA; j++)
-	{	// see if we can find "j" residue type in the itsAllowedResidues vector
-		UInt tempindex = 999;
-		for (UInt i=0; i<numallowed; i++)
-		{	if (itsAllowedResidues[i].getIdentity() == j)
-			{	tempindex = i;
-				break;
-			}
-		}
-		if (tempindex != 999)
-		{	allowedRot.resize(0);			
-			allowedRot = itsAllowedResidues[tempindex].getAllowedRotamers();
-			database.push_back(allowedRot);
-		}
-		else
-		{	allowedRot.resize(0);
-			database.push_back(allowedRot);
-		}
-	}
-	return database;
-}
 /*   CONFORMATION CODE NOT USED
 void chainPosition::listAllowedConformations(UInt _aaType)
 {

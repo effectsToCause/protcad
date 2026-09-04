@@ -43,40 +43,12 @@ public:
 		{ return itsScaleFactor; }
 
 	static double itsRadiusScaleFactor;
-	static void setRadiusScaleFactor(const double _scale)
-		{ itsRadiusScaleFactor = _scale;
-                //  cout << " vdW radius scale factor set to: " << _scale << endl;
-
-                }
-	static double getRadiusScaleFactor()
-		{ return itsRadiusScaleFactor; }
 
 	static bool linearRepulsionDampening;	// Kuhlman & Baker PNAS v97 p10383
-	static void setLinearRepulsionDampeningOn()
-		{ linearRepulsionDampening = true; 
-                //  cout << " vdW linear repulsion dampening activated." << endl; 
-
-		}
-	static void setLinearRepulsionDampeningOff()
-		{ linearRepulsionDampening = false; 
-		//cout << " vdw linear repulsion dampening deactivated." << endl; 
-		}
 
 	static double itsAttractionScaleFactor;
-	static void setAttractionScaleFactor( const double _scale)
-		{ itsAttractionScaleFactor = _scale; 
-	//		cout << " vdW attraction scale factor set to: " << itsAttractionScaleFactor << endl; 
-		}
-	static double getAttractionScaleFactor()
-		{ return itsAttractionScaleFactor; }
 	
 	static double itsRepulsionScaleFactor;
-	static void setRepulsionScaleFactor( const double _scale)
-		{ itsRepulsionScaleFactor = _scale; 
-		//cout << " vdW repulsion scale factor set to: " << itsRepulsionScaleFactor << endl; 
-		}
-	static double getRepulsionScaleFactor()
-		{ return itsRepulsionScaleFactor; }
 	
 private:
 	void buildDataBase();
