@@ -95,7 +95,7 @@ if(PROTCAD_BUILD_TESTS)
                            fusionTest replicaTest)
     # Need a structure argument.
     set(PROTCAD_PDB_TESTS batchDeltaTest clashCheck energyTerms frozenDielectricTest
-                          invarianceTest rotamerTest)
+                          invarianceTest rotamerTest terminusTest)
 
     file(GLOB PROTCAD_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/*.cc)
     foreach(src ${PROTCAD_TEST_SOURCES})

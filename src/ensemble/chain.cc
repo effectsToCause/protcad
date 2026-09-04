@@ -448,7 +448,7 @@ static bool localFrame(const dblVec& p0, const dblVec& p1, const dblVec& p2,
 }
 
 void chain::restoreNativeCoords(residue* _res,
-                                const vector<UInt>& _nativeIndex,
+                                const vector<string>& _nativeName,
                                 const vector<dblVec>& _nativeCoord)
 {
 	UInt numAtoms = _res->getNumAtoms();
@@ -457,13 +457,22 @@ void chain::restoreNativeCoords(residue* _res,
 	vector<dblVec> ideal;
 	for (UInt a = 0; a < numAtoms; a++) {ideal.push_back(_res->getCoords(a));}
 
+	// Match by atom name, never by index.  mutateNew promotes the first and
+	// last residue of a chain to their N- and C-terminal templates, which
+	// have a different atom count and a different atom order from the plain
+	// template the coordinates were captured against (ALA is
+	// N CA C O CB H HA HB1 HB2 HB3, ALN is N CA C O CB HA HB1 HB2 HB3 H1 H2 H3).
+	// Restoring positionally therefore wrote the amide H onto HA and left the
+	// terminal hydrogens at raw template coordinates, on top of other atoms.
 	vector<bool> supplied(numAtoms, false);
-	for (UInt a = 0; a < _nativeIndex.size(); a++)
-	{	UInt idx = _nativeIndex[a];
-		if (idx < numAtoms)
-		{	_res->setCoords(idx, _nativeCoord[a]);
-			_res->getAtom(idx)->setIsFullySpecified();
-			supplied[idx] = true;
+	for (UInt a = 0; a < _nativeName.size(); a++)
+	{	for (UInt b = 0; b < numAtoms; b++)
+		{	if (_res->getAtom(b)->getName() == _nativeName[a])
+			{	_res->setCoords(b, _nativeCoord[a]);
+				_res->getAtom(b)->setIsFullySpecified();
+				supplied[b] = true;
+				break;
+			}
 		}
 	}
 
@@ -544,12 +553,12 @@ void chain::rebuildResidue(const UInt _indexInChain){	if (_indexInChain < itsRes
 		// Set PROTCAD_IDEALISE_XYZ to recover the old rebuild-everything
 		// behaviour.
 		static const bool nativeXYZ = (getenv("PROTCAD_IDEALISE_XYZ") == 0);
-		vector<UInt> nativeIndex;
+		vector<string> nativeName;
 		vector<dblVec> nativeCoord;
 		if (nativeXYZ && !fliptoD)
 		{	for (UInt a = 0; a < pOldRes->getNumAtoms(); a++)
 			{	if (pOldRes->getAtom(a)->isFullySpecified())
-				{	nativeIndex.push_back(a);
+				{	nativeName.push_back(pOldRes->getAtom(a)->getName());
 					nativeCoord.push_back(pOldRes->getCoords(a));
 				}
 			}
@@ -559,8 +568,8 @@ void chain::rebuildResidue(const UInt _indexInChain){	if (_indexInChain < itsRes
 		else{itsResidues[_indexInChain] = pOldRes->mutateNew(itsResType);}
 		setSidechainDihedralAngles(_indexInChain, currentRot);
 
-		if (!nativeIndex.empty())
-		{	restoreNativeCoords(itsResidues[_indexInChain], nativeIndex, nativeCoord);
+		if (!nativeName.empty())
+		{	restoreNativeCoords(itsResidues[_indexInChain], nativeName, nativeCoord);
 		}
 
 		itsResidues[_indexInChain]->isArtificiallyBuilt = true;
