@@ -1,6 +1,6 @@
 // filename: residueIterator.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <iostream>
 #include "typedef.h"
 #include "protein.h"

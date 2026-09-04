@@ -1,7 +1,7 @@
 // filename: line.h
 // contents: class line is defined
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include "typedef.h"
 #include "point.h"

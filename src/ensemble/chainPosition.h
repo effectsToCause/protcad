@@ -1,6 +1,6 @@
 // filename: chainPosition.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include "typedef.h"
 #include "ran.h"

@@ -1,7 +1,7 @@
 // filename: treeNode.h
 // contents: class treeNode defined
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include <iostream>
 #include "typedef.h"

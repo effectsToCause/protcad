@@ -1,6 +1,6 @@
 // filename allowedResidue.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <vector>
 #include "typedef.h"

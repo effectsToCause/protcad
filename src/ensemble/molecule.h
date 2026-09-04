@@ -1,7 +1,7 @@
 // filename: molecule.h
 // contents: base class molecule is defined
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <vector>
 #include <ran.h>

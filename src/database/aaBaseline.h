@@ -1,6 +1,6 @@
 // filename: aaBaseline.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <fstream>
 #include <vector>

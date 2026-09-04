@@ -9,7 +9,7 @@
 //*****************************************************************************************************
 
 //--Class Setup----------------------------------------------------------------------------------------
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <vector>
 #include <algorithm>
@@ -39,7 +39,6 @@ class protein : public molecule
 public:
 	friend class atomIterator;
     friend class residueIterator;
-	friend class ruler;
 
 //--Functions--------------------------------------------------------------------------------------------	
 	

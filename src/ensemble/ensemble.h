@@ -5,7 +5,7 @@
 // filename: ensemble.h
 // contents: class ensemble is defined
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include "ran.h"
 #include "typedef.h"

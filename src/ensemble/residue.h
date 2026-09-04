@@ -6,7 +6,7 @@
 // ***********************************************************************
 // ***********************************************************************
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <vector>
 #include "generalio.h"
@@ -61,8 +61,6 @@ class residue
 	friend class allowedResidue;
 	friend class rotamerLib;
 	friend class protein;
-	friend class ruler;
-	//friend molecule* pdbReader(const string& _filename);
 
 // ***********************************************************************
 // ***********************************************************************

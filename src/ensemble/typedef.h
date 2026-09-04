@@ -8,9 +8,13 @@ using namespace std;
 #ifndef TYPEDEF_H
 #define TYPEDEF_H
 
-// Check for CUDA lib
+// Check for CUDA lib.  The CMake build already defines __CUDA__ on the command
+// line for every translation unit; the guard keeps this fallback working for a
+// direct compile without redefining the macro (which warned on every TU).
 #if __has_include("cuda_runtime.h")
+#ifndef __CUDA__
 #define __CUDA__
+#endif
 #endif
 
 //physical constants

@@ -1,6 +1,6 @@
 // filename: chain.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 #include <vector>
 #include "typedef.h"
@@ -24,7 +24,6 @@ class chain
 {
 public:
 	friend class atomIterator;
-	friend class ruler;
 
 	// Constructor and Destructor declaration
 	chain();

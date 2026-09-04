@@ -1,6 +1,6 @@
 // filename: atomIterator.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <iostream>
 #include "typedef.h"
 #include "protein.h"

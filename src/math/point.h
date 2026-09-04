@@ -1,7 +1,7 @@
 // filename: point.h
 // contents: class point is defined
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include "typedef.h"
 //#include "CMath.h"

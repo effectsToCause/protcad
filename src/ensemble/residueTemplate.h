@@ -1,4 +1,4 @@
-#include "assert.h"
+#include "pcAssert.h"
 #include "atom.h"
 #include "amberVDW.h"
 #include "amberElec.h"

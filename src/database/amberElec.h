@@ -20,7 +20,7 @@
 #include <vector>
 #include "typedef.h"
 #include <stdio.h>
-#include "assert.h"
+#include "pcAssert.h"
 #include <string.h>
 
 #ifndef RESIDUE_H

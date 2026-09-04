@@ -1,6 +1,6 @@
 // filename secondaryStructure.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include "typedef.h"
 #include "ramachandranMap.h"
 

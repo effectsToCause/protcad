@@ -1,6 +1,6 @@
 // filename ramachandranMap.h
 
-#include "assert.h"
+#include "pcAssert.h"
 #include <vector>
 #include "typedef.h"
 

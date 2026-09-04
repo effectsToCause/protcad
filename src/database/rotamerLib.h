@@ -1,4 +1,4 @@
-#include "assert.h"
+#include "pcAssert.h"
 #include "typedef.h"
 #include "rotamer.h"
 #include <iostream>
