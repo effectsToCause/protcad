@@ -168,7 +168,7 @@ is the same wall behind the 3e5 kcal/mol blowups from 0.001 A pairs.
 ## Settled negative: the repulsive wall is not what inflates ddG
 
 The section above nominates softening the wall as the next lever. It was
-implemented (exp-6 and soft-core, bf200af) and measured. **It does not work.**
+implemented (exp-6 and soft-core, a94ecba) and measured. **It does not work.**
 
 Two arms, identical binaries and identical budgets (36000 sweeps, 8 seeds, 32
 replicas, rigid folded backbone), differing only in PROTCAD_VDW_WALL. Each arm
@@ -198,7 +198,7 @@ It also costs precision: sd(dA_folded) goes from 0.53-0.60 under lj to
 0.76-1.13 under exp-6, as a flatter landscape admits more basin diversity.
 Nothing bought, precision spent. **Default stays lj.** exp-6 and soft-core are
 retained as lambda-path devices, which is what soft-core was already reduced to
-(see bf200af for why it is disqualified as an endpoint Hamiltonian).
+(see a94ecba for why it is disqualified as an endpoint Hamiltonian).
 
 Where the error must live instead. The unfolded leg is precise to sd 0.02-0.06
 -- a tripeptide converges hard -- so both the noise and the inflation sit
