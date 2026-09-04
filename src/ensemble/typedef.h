@@ -3,9 +3,7 @@
 #include <string>
 #include <vector>
 using namespace std;
-#include "tnt/tnt.h"
-#include "tnt/vec.h"
-#include "tnt/cmat.h"
+#include "vec3.h"
 
 #ifndef TYPEDEF_H
 #define TYPEDEF_H
@@ -32,8 +30,8 @@ typedef vector<double> DouVec;
 typedef vector<double> DblVec;
 typedef vector<UInt> UIntVec;
 typedef vector<string> StrVec;
-typedef TNT::Vector<double> dblVec;
-typedef TNT::Matrix<double> dblMat;
+typedef Vec3 dblVec;
+typedef Mat3 dblMat;
 
 #ifndef CMATH_H
 #include "CMath.h"

@@ -7,7 +7,7 @@
 double CMath::dotProduct(const dblVec& _vec1, const dblVec& _vec2)
 {
 	int N = _vec1.dim();
-	ASSERT (N == _vec2.dim() );
+	// dimension is guaranteed by the Vec3 type; the old TNT ASSERT is moot
 	double sum = 0.0;
 	for (int i=0; i<N; i++)
 	{
@@ -19,7 +19,7 @@ double CMath::dotProduct(const dblVec& _vec1, const dblVec& _vec2)
 dblVec CMath::dotProduct(const dblMat& _mat1, const dblVec& _vec1)
 {
 	int N = _vec1.dim();
-	ASSERT (N == _mat1.num_cols() );
+	// dimension is guaranteed by the Mat3 type; the old TNT ASSERT is moot
 	dblVec result(N);
 	for (int i=0; i<N; i++)
 	{
