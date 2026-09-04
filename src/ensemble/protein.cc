@@ -2546,6 +2546,7 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 	vector <double> cumAngle((size_t)P * nAllGroups, 0.0);
 	vector <UInt> torsionHist((size_t)nAllGroups * NBINS, 0);
 	double sumE = 0.0, sumE2 = 0.0; UInt nSamples = 0;
+	unsigned long nAccept = 0, nPropose = 0;
 
 	// Burn-in discards the descent from the starting structure, which is not
 	// an equilibrium sample.  Half the run is a blunt default but it is honest
@@ -2636,6 +2637,7 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 		// the entropy comes out too low.
 		for (int k = 0; k < P; k++)
 		{
+			if (nGroups[k] > 0) {nPropose++; if (accept[k]) {nAccept++;}}
 			if (!accept[k]) {continue;}
 			for (int j = 0; j < nGroups[k]; j++)
 			{
@@ -2675,6 +2677,7 @@ void protein::protMinReplicaCU(UInt _sweeps, UInt _nReplicas)
 	// NOT safe to quote for a folded state, where coupling is the whole point.
 	itsEnsembleStats = ensembleStats();
 	itsEnsembleStats.minEnergy = bestEnergy;
+	if (nPropose > 0) {itsEnsembleStats.acceptRate = (double)nAccept / (double)nPropose;}
 	if (nSamples > 0)
 	{
 		const double R = 0.0019872041;   // kcal/(mol K)

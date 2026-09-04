@@ -87,7 +87,8 @@ int main (int argc, char* argv[])
 	if (es.valid)
 	{
 		cout << "--- ensemble (post burn-in) ---" << endl;
-		cout << "samples " << es.samples << "  torsions " << es.torsions << endl;
+		cout << "samples " << es.samples << "  torsions " << es.torsions
+		     << "  accept " << 100.0 * es.acceptRate << " %" << endl;
 		cout << "<E>: " << es.meanEnergy << " +/- " << es.sdEnergy << " kcal/mol" << endl;
 		cout << "minE: " << es.minEnergy << " kcal/mol" << endl;
 		cout << "S_conf: " << es.conformEntropy << " kcal/(mol K)" << endl;

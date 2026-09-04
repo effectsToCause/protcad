@@ -365,9 +365,10 @@ public:
 		double minEnergy;        // best conformation seen, the legacy estimator
 		double conformEntropy;   // S_conf in kcal/(mol K), from torsion occupancy
 		double freeEnergy;       // <E> - T*S_conf
+		double acceptRate;       // accepted proposals / total, the MC health check
 		ensembleStats() : valid(false), samples(0), torsions(0), meanEnergy(0.0),
 		                  sdEnergy(0.0), minEnergy(0.0), conformEntropy(0.0),
-		                  freeEnergy(0.0) {}
+		                  freeEnergy(0.0), acceptRate(0.0) {}
 	};
 	const ensembleStats& getEnsembleStats() const {return itsEnsembleStats;}
 
