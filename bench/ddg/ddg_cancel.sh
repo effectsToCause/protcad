@@ -30,9 +30,28 @@ export CUDA_VISIBLE_DEVICES=0
 # this experiment, and letting it come in from the caller's environment means a
 # result cannot be attributed to one.
 export PROTCAD_ENERGY_LEGACY=${PROTCAD_ENERGY_LEGACY:-0}
+
+# The folded state is sampled with a RIGID backbone, and this is pinned rather
+# than inherited because it is a correctness condition, not a speed knob.
+#
+# Mobile-backbone folded sampling does not converge.  1crn at 32 replicas shows
+# <E> still falling 9.5 and T*S still rising 4.2 per tripling of sweeps out to
+# 108k, with no plateau, and the WT-mutant difference is precise but biased:
+# dA reads -9.68/-10.91/-8.96 at 12k/36k/108k while two seeds agree to 0.2-0.7
+# at each rung.  Sidechain-only sampling converges by 12k (<E> 449.4/446.2/
+# 445.7, T*S 42.6/41.6/42.0) and gives dA -10.04 +/- 0.24 over three seeds.
+#
+# Freezing the backbone leaves R*T*ln24 = 1.89 kcal/mol per backbone torsion
+# unaccounted in S_f relative to S_u.  That offset cancels here because ddG is
+# a DOUBLE difference and WT and mutant have the same backbone torsion count
+# for any non-Gly, non-Pro substitution.  It would NOT cancel in a single
+# folding free energy, so do not read the per-structure A as one.
+export PROTCAD_MC_BACKBONE=0
 BIN=$HOME/protcad/bin
 PROT=${1:-1crn}
-SWEEPS=${2:-8000}
+# 36000 rather than 8000: the sidechain ensemble is flat by 12k, but the
+# seed spread of dA tightens from 0.72 to 0.24 between 12k and 36k.
+SWEEPS=${2:-36000}
 SEEDS=${3:-8}
 # nReplicas was 1, which cannot estimate an ensemble: consecutive sweeps of a
 # single chain are strongly correlated, so S_conf undersamples badly at any
